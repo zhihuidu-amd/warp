@@ -25,6 +25,12 @@
 // NVCC/HIPCC: Include runtime headers to get float4
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #include "hip_util.h"
+// AMD rocWMMA: header-only MFMA C++ API (ROCm 7.x+, gfx942+)
+// Guard: exclude from HIPRTC JIT context — headers unavailable at JIT time
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(__HIPCC_RTC__)
+#include <rocwmma/rocwmma.hpp>
+#define WP_ENABLE_ROCWMMA 1
+#endif
 #else
 #include <cuda_runtime.h>
 #endif
@@ -5564,6 +5570,38 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
     // Whether boundary checks can be eliminated at compile time
     constexpr bool aligned_m = (M % BM == 0);
     constexpr bool aligned_n = (N % BN == 0);
+
+    // AMD rocWMMA fast path: MFMA_F32_16x16x4 for 16x16 FP32 tiles
+    // Equivalent to WP_ENABLE_MATHDX / cuBLASDx path on NVIDIA
+#if defined(WP_ENABLE_ROCWMMA)
+    if constexpr (M == 16 && N == 16 && K % 4 == 0 &&
+                  sizeof(ElemA) == 4 && sizeof(ElemB) == 4 && sizeof(ElemC) == 4) {
+        rocwmma::fragment<rocwmma::matrix_a,    16, 16, 4, float, rocwmma::row_major> a_frag;
+        rocwmma::fragment<rocwmma::matrix_b,    16, 16, 4, float, rocwmma::row_major> b_frag;
+        rocwmma::fragment<rocwmma::accumulator, 16, 16, 4, float>                     c_frag;
+        T beta_val = T(beta);
+        if (beta_val == T(0)) { rocwmma::fill_fragment(c_frag, 0.0f); }
+        else {
+            rocwmma::load_matrix_sync(c_frag, c_ptr, N, rocwmma::mem_row_major);
+            if (beta_val != T(1)) {
+                WP_PRAGMA_UNROLL
+                for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(beta_val);
+            }
+        }
+        for (int k = 0; k < K; k += 4) {
+            rocwmma::load_matrix_sync(a_frag, a_ptr + k * sa1, K);
+            rocwmma::load_matrix_sync(b_frag, b_ptr + k * sb0, N);
+            rocwmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+        }
+        T alpha_val = T(alpha);
+        if (alpha_val != T(1)) {
+            WP_PRAGMA_UNROLL
+            for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
+        }
+        rocwmma::store_matrix_sync(c_ptr, c_frag, N, rocwmma::mem_row_major);
+        return;
+    }
+#endif  // WP_ENABLE_ROCWMMA
 
     for (int t = WP_TILE_THREAD_IDX; t < num_blocks; t += WP_TILE_BLOCK_DIM) {
         const int block_i = t / blocks_n;
