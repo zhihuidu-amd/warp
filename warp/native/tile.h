@@ -5575,6 +5575,7 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
     // Equivalent to WP_ENABLE_MATHDX / cuBLASDx path on NVIDIA
 #if defined(WP_ENABLE_ROCWMMA)
     if constexpr (M == 16 && N == 16 && K % 4 == 0 &&
+                  sa1 == 1 && sb1 == 1 && sc1 == 1 &&  // require unit column strides
                   sizeof(ElemA) == 4 && sizeof(ElemB) == 4 && sizeof(ElemC) == 4) {
         rocwmma::fragment<rocwmma::matrix_a,    16, 16, 4, float, rocwmma::row_major> a_frag;
         rocwmma::fragment<rocwmma::matrix_b,    16, 16, 4, float, rocwmma::row_major> b_frag;
@@ -5582,15 +5583,15 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
         T beta_val = T(beta);
         if (beta_val == T(0)) { rocwmma::fill_fragment(c_frag, 0.0f); }
         else {
-            rocwmma::load_matrix_sync(c_frag, c_ptr, N, rocwmma::mem_row_major);
+            rocwmma::load_matrix_sync(c_frag, c_ptr, sc0, rocwmma::mem_row_major);  // leading=row stride of C
             if (beta_val != T(1)) {
                 WP_PRAGMA_UNROLL
                 for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(beta_val);
             }
         }
         for (int k = 0; k < K; k += 4) {
-            rocwmma::load_matrix_sync(a_frag, a_ptr + k * sa1, K);
-            rocwmma::load_matrix_sync(b_frag, b_ptr + k * sb0, N);
+            rocwmma::load_matrix_sync(a_frag, a_ptr + k,       sa0, rocwmma::mem_row_major);  // ptr=col k, leading=row stride
+            rocwmma::load_matrix_sync(b_frag, b_ptr + k * sb0, sb0, rocwmma::mem_row_major);  // ptr=row k, leading=row stride
             rocwmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
         T alpha_val = T(alpha);
@@ -5598,7 +5599,7 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
             WP_PRAGMA_UNROLL
             for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
         }
-        rocwmma::store_matrix_sync(c_ptr, c_frag, N, rocwmma::mem_row_major);
+        rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);  // leading=row stride of C
         return;
     }
 #endif  // WP_ENABLE_ROCWMMA
