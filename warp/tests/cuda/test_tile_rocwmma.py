@@ -152,6 +152,36 @@ class TestTileMatmulRocWMMA(unittest.TestCase):
         self._run_matmul_test(16, 16, 16, device, alpha=1.0, beta=1.0)
 
 
+
+    @parameterize_with_devices(get_test_devices())
+    def test_tile_matmul_accumulate_false_ignores_beta(self, device):
+        """Accumulate=false (overwrite mode): C must equal alpha*A@B, regardless of beta or initial C.
+        
+        This tests the Accumulate template parameter is respected in the rocWMMA path.
+        Bug: original code used T(beta) unconditionally; Accumulate=false should force beta=0.
+        When tile_matmul is called in non-accumulate mode, initial C content must be ignored.
+        """
+        A_np = np.random.randn(16, 16).astype(np.float32)
+        B_np = np.random.randn(16, 16).astype(np.float32)
+        # Initialize C with large non-zero values that would corrupt output if beta!=0 leaked
+        C_np = np.ones((16, 16), dtype=np.float32) * 999.0
+
+        expected = A_np @ B_np  # alpha=1, beta must be 0 (overwrite mode)
+
+        A_wp = wp.array(A_np, dtype=float, device=device)
+        B_wp = wp.array(B_np, dtype=float, device=device)
+        C_wp = wp.array(C_np, dtype=float, device=device)
+
+        # tile_matmul_16x16_kernel uses tile_matmul without accumulate (Accumulate=false path)
+        # Result should be A@B, completely ignoring initial C_wp contents
+        wp.launch_tiled(tile_matmul_16x16_kernel,
+                       dim=(1,), inputs=[A_wp, B_wp], outputs=[C_wp],
+                       block_dim=64, device=device)
+
+        result = C_wp.numpy()
+        np.testing.assert_allclose(result, expected, atol=1e-4, rtol=1e-4,
+            err_msg="Accumulate=false ignored beta: initial C content leaked into result")
+
 if __name__ == "__main__":
     wp.init()
     unittest.main(verbosity=2)

@@ -5580,7 +5580,11 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
         rocwmma::fragment<rocwmma::matrix_a,    16, 16, 4, float, rocwmma::row_major> a_frag;
         rocwmma::fragment<rocwmma::matrix_b,    16, 16, 4, float, rocwmma::row_major> b_frag;
         rocwmma::fragment<rocwmma::accumulator, 16, 16, 4, float>                     c_frag;
-        T beta_val = T(beta);
+        // Respect Accumulate template param: when false, always overwrite C (ignore beta).
+        // Matches scalar_matmul<Accumulate> semantics exactly.
+        // Bug fixed: original code used T(beta) unconditionally, diverging from scalar path
+        // which uses `if constexpr (Accumulate)` to decide whether to read C at all.
+        T beta_val = Accumulate ? T(beta) : T(0);
         if (beta_val == T(0)) { rocwmma::fill_fragment(c_frag, 0.0f); }
         else {
             rocwmma::load_matrix_sync(c_frag, c_ptr, sc0, rocwmma::mem_row_major);  // leading=row stride of C
