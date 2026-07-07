@@ -5580,30 +5580,60 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
         rocwmma::fragment<rocwmma::matrix_a,    16, 16, 4, float, rocwmma::row_major> a_frag;
         rocwmma::fragment<rocwmma::matrix_b,    16, 16, 4, float, rocwmma::row_major> b_frag;
         rocwmma::fragment<rocwmma::accumulator, 16, 16, 4, float>                     c_frag;
-        // Respect Accumulate template param: when false, always overwrite C (ignore beta).
-        // Matches scalar_matmul<Accumulate> semantics exactly.
-        // Bug fixed: original code used T(beta) unconditionally, diverging from scalar path
-        // which uses `if constexpr (Accumulate)` to decide whether to read C at all.
-        T beta_val = Accumulate ? T(beta) : T(0);
-        if (beta_val == T(0)) { rocwmma::fill_fragment(c_frag, 0.0f); }
-        else {
-            rocwmma::load_matrix_sync(c_frag, c_ptr, sc0, rocwmma::mem_row_major);  // leading=row stride of C
-            if (beta_val != T(1)) {
-                WP_PRAGMA_UNROLL
-                for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(beta_val);
-            }
-        }
+        // Correct GEMM: C_out = alpha * A@B + beta * C_in
+        // Implementation: always start c_frag=0, accumulate A@B via mma_sync,
+        // then apply alpha and beta element-wise AFTER the K-loop.
+        // This correctly separates alpha (scales A@B only) from beta (scales C_in only).
+        //
+        // IMPORTANT: Do NOT pre-load beta*C_in into c_frag before mma_sync.
+        // mma_sync does c += a*b, so if c=beta*C_in first, then alpha is applied
+        // to the whole accumulator: alpha*(A@B + beta*C_in) != alpha*A@B + beta*C_in.
+        rocwmma::fill_fragment(c_frag, 0.0f);
         for (int k = 0; k < K; k += 4) {
-            rocwmma::load_matrix_sync(a_frag, a_ptr + k,       sa0, rocwmma::mem_row_major);  // ptr=col k, leading=row stride
-            rocwmma::load_matrix_sync(b_frag, b_ptr + k * sb0, sb0, rocwmma::mem_row_major);  // ptr=row k, leading=row stride
+            rocwmma::load_matrix_sync(a_frag, a_ptr + k,       sa0, rocwmma::mem_row_major);
+            rocwmma::load_matrix_sync(b_frag, b_ptr + k * sb0, sb0, rocwmma::mem_row_major);
             rocwmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         }
+        // c_frag = A@B here. Now apply alpha and beta per-element.
         T alpha_val = T(alpha);
-        if (alpha_val != T(1)) {
-            WP_PRAGMA_UNROLL
-            for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
+        // When Accumulate=false: overwrite C (beta must be 0 semantically).
+        // When Accumulate=true:  C_out = alpha*c_frag + beta*C_in.
+        if constexpr (!Accumulate) {
+            // Simple overwrite: C = alpha * A@B
+            if (alpha_val == T(1)) {
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            } else {
+                WP_PRAGMA_UNROLL
+                for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            }
+        } else {
+            // Accumulate: C_out = alpha * A@B + beta * C_in
+            // Read C_in element-by-element from shared memory (already in L1).
+            // rocWMMA fragment element mapping for 16x16x4 accumulator:
+            // Each lane holds num_elements elements of the output tile.
+            // We use store+load of the A@B result combined with element-wise beta*C.
+            // Simpler: use load_matrix_sync to read C_in into a temporary fragment,
+            // then combine: c_out[i] = alpha*c_frag[i] + beta*c_in_frag[i].
+            T beta_val = T(beta);
+            if (beta_val == T(0)) {
+                // No C_in contribution needed
+                if (alpha_val != T(1)) {
+                    WP_PRAGMA_UNROLL
+                    for (int i = 0; i < (int)c_frag.num_elements; i++) c_frag.x[i] *= float(alpha_val);
+                }
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            } else {
+                // Load C_in into a separate fragment, combine element-wise
+                rocwmma::fragment<rocwmma::accumulator, 16, 16, 4, float> c_in_frag;
+                rocwmma::load_matrix_sync(c_in_frag, c_ptr, sc0, rocwmma::mem_row_major);
+                WP_PRAGMA_UNROLL
+                for (int i = 0; i < (int)c_frag.num_elements; i++) {
+                    c_frag.x[i] = float(alpha_val) * c_frag.x[i] + float(beta_val) * c_in_frag.x[i];
+                }
+                rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
+            }
         }
-        rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);  // leading=row stride of C
         return;
     }
 #endif  // WP_ENABLE_ROCWMMA

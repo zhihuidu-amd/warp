@@ -182,6 +182,43 @@ class TestTileMatmulRocWMMA(unittest.TestCase):
         np.testing.assert_allclose(result, expected, atol=1e-4, rtol=1e-4,
             err_msg="Accumulate=false ignored beta: initial C content leaked into result")
 
+
+    @parameterize_with_devices(get_test_devices())
+    def test_tile_matmul_alpha2_beta1(self, device):
+        """C = 2.0*A@B + 1.0*C_in — catches alpha-applied-to-wrong-operand bug.
+        
+        Bug: original code computed alpha*(A@B + beta*C_in) instead of alpha*A@B + beta*C_in.
+        With alpha=2, beta=1: buggy gives 2*(A@B + C_in), correct gives 2*A@B + C_in.
+        """
+        self._run_matmul_test(16, 16, 16, device, alpha=2.0, beta=1.0)
+
+    @parameterize_with_devices(get_test_devices())
+    def test_tile_matmul_alpha0_beta1(self, device):
+        """C = 0*A@B + 1.0*C_in = C_in — alpha=0 with beta=1 must preserve C_in exactly.
+        
+        Bug: original code computed alpha*(A@B + beta*C_in) = 0*(A@B + C_in) = 0.
+        Correct: 0*A@B + 1*C_in = C_in.
+        """
+        A_np = np.random.randn(16, 16).astype(np.float32)
+        B_np = np.random.randn(16, 16).astype(np.float32)
+        C_np = np.random.randn(16, 16).astype(np.float32)
+
+        expected = C_np.copy()  # 0*A@B + 1*C_in = C_in
+
+        A_wp = wp.array(A_np, dtype=float, device=device)
+        B_wp = wp.array(B_np, dtype=float, device=device)
+        C_in_wp = wp.array(C_np, dtype=float, device=device)
+        C_out_wp = wp.zeros((16, 16), dtype=float, device=device)
+
+        wp.launch_tiled(tile_matmul_alpha_beta_kernel,
+                       dim=(1,),
+                       inputs=[A_wp, B_wp, C_in_wp, float(0.0), float(1.0)],
+                       outputs=[C_out_wp],
+                       block_dim=64, device=device)
+
+        np.testing.assert_allclose(C_out_wp.numpy(), expected, atol=1e-5,
+            err_msg="alpha=0, beta=1: result should be C_in, not 0")
+
 if __name__ == "__main__":
     wp.init()
     unittest.main(verbosity=2)
