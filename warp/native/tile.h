@@ -5588,6 +5588,11 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
         // IMPORTANT: Do NOT pre-load beta*C_in into c_frag before mma_sync.
         // mma_sync does c += a*b, so if c=beta*C_in first, then alpha is applied
         // to the whole accumulator: alpha*(A@B + beta*C_in) != alpha*A@B + beta*C_in.
+        // rocWMMA 16x16 REQUIRES exactly 64 threads per block (one full warp).
+        // Warp always uses WP_TILE_BLOCK_DIM=64 for HIP, but assert to be safe.
+        static_assert(WP_TILE_BLOCK_DIM == 64,
+            "rocWMMA MFMA_F32_16x16x4 requires exactly 64 threads; "
+            "set block_dim=64 when launching tile kernels on AMD.");
         rocwmma::fill_fragment(c_frag, 0.0f);
         for (int k = 0; k < K; k += 4) {
             rocwmma::load_matrix_sync(a_frag, a_ptr + k,       sa0, rocwmma::mem_row_major);
