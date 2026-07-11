@@ -5654,8 +5654,8 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
                        sizeof(ElemA) == 2 && sizeof(ElemB) == 2 && sizeof(ElemC) == 4) {
         static_assert(WP_TILE_BLOCK_DIM == 64,
             "rocWMMA MFMA_F16_16x16x16 requires exactly 64 threads.");
-        rocwmma::fragment<rocwmma::matrix_a,    16, 16, 16, rocwmma::half_t, rocwmma::row_major> a16_frag;
-        rocwmma::fragment<rocwmma::matrix_b,    16, 16, 16, rocwmma::half_t, rocwmma::row_major> b16_frag;
+        rocwmma::fragment<rocwmma::matrix_a,    16, 16, 16, __half, rocwmma::row_major> a16_frag;
+        rocwmma::fragment<rocwmma::matrix_b,    16, 16, 16, __half, rocwmma::row_major> b16_frag;
         rocwmma::fragment<rocwmma::accumulator, 16, 16, 16, float>                               c16_frag;
         rocwmma::fill_fragment(c16_frag, 0.0f);
         for (int k = 0; k < K; k += 16) {
