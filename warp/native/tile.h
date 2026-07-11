@@ -30,7 +30,6 @@
 #if defined(__HIP_DEVICE_COMPILE__) && !defined(__HIPCC_RTC__)
 #include <rocwmma/rocwmma.hpp>
 #define WP_ENABLE_ROCWMMA 1
-// FP16 MFMA path (WP_ENABLE_ROCWMMA_FP16) reserved for future implementation
 #endif
 #else
 #include <cuda_runtime.h>
@@ -5638,52 +5637,6 @@ inline CUDA_CALLABLE void scalar_matmul(const StorageA& A, const StorageB& B, St
                     c_frag.x[i] = float(alpha_val) * c_frag.x[i] + float(beta_val) * c_in_frag.x[i];
                 }
                 rocwmma::store_matrix_sync(c_ptr, c_frag, sc0, rocwmma::mem_row_major);
-            }
-        }
-        return;
-    }
-    // AMD rocWMMA 32x32x2 fast path: for M=N=32 tiles (larger constraint matrices)
-    // MFMA_F32_32x32x2: 2x throughput vs 16x16x4 for same data, handles 32x32 tiles natively
-    // Requires 64 threads (one warp) — same as 16x16 path.
-    else if constexpr (M == 32 && N == 32 && K % 2 == 0 &&
-                       sa1 == 1 && sb1 == 1 && sc1 == 1 &&
-                       sizeof(ElemA) == 4 && sizeof(ElemB) == 4 && sizeof(ElemC) == 4) {
-        static_assert(WP_TILE_BLOCK_DIM == 64,
-            "rocWMMA MFMA_F32_32x32x2 requires exactly 64 threads.");
-        rocwmma::fragment<rocwmma::matrix_a,    32, 32, 2, float, rocwmma::row_major> a32_frag;
-        rocwmma::fragment<rocwmma::matrix_b,    32, 32, 2, float, rocwmma::row_major> b32_frag;
-        rocwmma::fragment<rocwmma::accumulator, 32, 32, 2, float>                     c32_frag;
-        rocwmma::fill_fragment(c32_frag, 0.0f);
-        for (int k = 0; k < K; k += 2) {
-            rocwmma::load_matrix_sync(a32_frag, a_ptr + k,       sa0, rocwmma::mem_row_major);
-            rocwmma::load_matrix_sync(b32_frag, b_ptr + k * sb0, sb0, rocwmma::mem_row_major);
-            rocwmma::mma_sync(c32_frag, a32_frag, b32_frag, c32_frag);
-        }
-        T alpha_val = T(alpha);
-        if constexpr (!Accumulate) {
-            if (alpha_val == T(1)) {
-                rocwmma::store_matrix_sync(c_ptr, c32_frag, sc0, rocwmma::mem_row_major);
-            } else {
-                WP_PRAGMA_UNROLL
-                for (int i = 0; i < (int)c32_frag.num_elements; i++) c32_frag.x[i] *= float(alpha_val);
-                rocwmma::store_matrix_sync(c_ptr, c32_frag, sc0, rocwmma::mem_row_major);
-            }
-        } else {
-            T beta_val = T(beta);
-            if (beta_val == T(0)) {
-                if (alpha_val != T(1)) {
-                    WP_PRAGMA_UNROLL
-                    for (int i = 0; i < (int)c32_frag.num_elements; i++) c32_frag.x[i] *= float(alpha_val);
-                }
-                rocwmma::store_matrix_sync(c_ptr, c32_frag, sc0, rocwmma::mem_row_major);
-            } else {
-                rocwmma::fragment<rocwmma::accumulator, 32, 32, 2, float> c_in32_frag;
-                rocwmma::load_matrix_sync(c_in32_frag, c_ptr, sc0, rocwmma::mem_row_major);
-                WP_PRAGMA_UNROLL
-                for (int i = 0; i < (int)c32_frag.num_elements; i++) {
-                    c32_frag.x[i] = float(alpha_val) * c32_frag.x[i] + float(beta_val) * c_in32_frag.x[i];
-                }
-                rocwmma::store_matrix_sync(c_ptr, c32_frag, sc0, rocwmma::mem_row_major);
             }
         }
         return;
