@@ -68,6 +68,22 @@ struct alignas(16) float4 {
 
 #endif
 
+// AMD rocWMMA: header-only MFMA C++ API (ROCm 7.x+, gfx942+).
+// NOTE: the include near the top of this file is nested inside a !__HIPCC_RTC__
+// region (to avoid float4 redefinition from HIP runtime headers), so it is
+// unreachable under HIPRTC JIT.  rocWMMA itself, however, compiles cleanly under
+// HIPRTC, so we include it here — outside that region — guarded only by device
+// compile + header availability, making the MFMA fast path active for BOTH
+// AOT (warp.so) and HIPRTC-compiled user kernels.
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(WP_ENABLE_ROCWMMA)
+#if defined(__has_include)
+#if __has_include(<rocwmma/rocwmma.hpp>)
+#include <rocwmma/rocwmma.hpp>
+#define WP_ENABLE_ROCWMMA 1
+#endif
+#endif
+#endif
+
 #define WP_USE_REGISTER_GEMM 0
 
 // Type trait to detect null function placeholder (int literal 0).
