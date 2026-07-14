@@ -3978,7 +3978,11 @@ class Device:
         graphs.
         """
         if self.is_hip:
-            return False
+            import os
+            # AMD patch: WP_HIP_GRAPH_ENABLE=1 opts in to hipGraph on ROCm 7.x+
+            # Equivalent to ORT_MIGRAPHX_HIP_GRAPH_ENABLE=1 + ORT_MIGRAPHX_COALESCE_IO=1
+            # Requires pre-allocated arrays (no wp.zeros() inside capture window)
+            return os.environ.get("WP_HIP_GRAPH_ENABLE", "0") == "1"
         return True
 
     @property
@@ -9462,13 +9466,20 @@ def capture_begin(
     if stream is None:
         stream = device.stream
 
-    # HIP/ROCm graph capture is not yet mature (mempool pointer remapping bugs,
-    # event timing inside graphs, etc.). Disable until hipGraph stabilizes.
-    # See ``Device.supports_graph_capture`` -- callers (notably
-    # :class:`ScopedCapture`) treat a ``False`` return as "capture disabled" and
-    # skip the matching :func:`capture_end`.
+    # AMD patch: WP_HIP_GRAPH_ENABLE=1 opts in to hipGraph on ROCm.
+    # When enabled, disable mempool (use hipMalloc not hipMallocAsync) during
+    # capture to avoid pointer remapping issues -- same fix as ORT COALESCE_IO.
     if not device.supports_graph_capture:
         return False
+
+    _hip_mempool_disabled = False
+    if device.is_hip:
+        # Temporarily disable mempool so all allocations use hipMalloc (stable addresses)
+        try:
+            device.mempool_release_threshold = 0
+            _hip_mempool_disabled = True
+        except Exception:
+            pass
 
     # Create APIC recording state if requested
     apic_capture = None
