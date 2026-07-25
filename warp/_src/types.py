@@ -3571,6 +3571,16 @@ class array(Array[DType, NDim]):
                     ptr = allocator.allocate(capacity)
             else:
                 ptr = allocator.allocate(capacity)
+        elif device.is_cuda and getattr(device, "is_hip", False):
+            # HIP/ROCm: hipMalloc(0) returns NULL unlike CUDA; zero-size arrays get ptr=None
+            # which causes GPU page faults when passed as kernel arguments on ROCm.
+            # Allocate 1 byte to ensure a valid non-null stable pointer.
+            alloc_size = 1
+            if device.is_cuda:
+                with device.context_guard:
+                    ptr = allocator.allocate(alloc_size)
+            else:
+                ptr = allocator.allocate(alloc_size)
         else:
             ptr = None
 
