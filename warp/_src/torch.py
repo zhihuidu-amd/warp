@@ -221,7 +221,11 @@ def from_torch(
     # semantics differ from CUDA. Sync PyTorch's stream to ensure tensor data is ready.
     if sync and t.is_cuda:
         import torch  # noqa: PLC0415
-        torch.cuda.current_stream(t.device).synchronize()
+        # graphs-on-hip fix: stream sync is illegal during CUDA/HIP graph capture
+        # (hipErrorStreamCaptureUnsupported) and unnecessary (capture records order).
+        # Skip while capturing. See: ROCm/warp PR #15 + Prabhu's fix.
+        if not torch.cuda.is_current_stream_capturing():
+            torch.cuda.current_stream(t.device).synchronize()
 
     if dtype is None:
         dtype = dtype_from_torch(t.dtype)

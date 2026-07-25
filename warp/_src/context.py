@@ -3859,11 +3859,15 @@ class Device:
                 # enable if supported
                 self.is_mempool_enabled = self.is_mempool_supported
             elif self.is_hip and self.is_mempool_supported:
-                # HIP/ROCm: enable mempool by default when graph capture is supported
-                # (hipGraph requires mempool for in-capture allocations).
-                # Previously disabled due to hipMemsetAsync unreliability, but
-                # graph capture is now validated on ROCm 7.2 (Warp PR #15).
-                self.is_mempool_enabled = True
+                # HIP/ROCm: do NOT auto-enable mempool at device init.
+                # Reason: when PyTorch (lw torch 2.9.1+rocm7.2.0) is also loaded,
+                # both runtimes compete to own the HIP memory pool at init time,
+                # causing a null pointer fault (Memory access fault on address nil).
+                # Callers that need hipGraph must explicitly opt in AFTER both
+                # torch and warp are fully initialized:
+                #   wp.set_mempool_enabled(device, True)  # before ScopedCapture
+                # This matches the CUDA default (disabled unless enable_mempools_at_init).
+                self.is_mempool_enabled = False
             else:
                 # disable by default
                 self.is_mempool_enabled = False
