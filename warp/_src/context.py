@@ -3404,6 +3404,11 @@ class CudaDefaultAllocator:
         self.device = device
 
     def allocate(self, size_in_bytes):
+        # HIP/ROCm: hipMalloc(0) returns NULL (unlike CUDA which returns a valid non-null ptr).
+        # Zero-size allocations are valid in warp (e.g. conditional arrays, empty island buffers).
+        # Use 1-byte minimum to ensure a stable non-null pointer on HIP.
+        if size_in_bytes == 0 and self.device.is_hip:
+            size_in_bytes = 1
         ptr = runtime.core.wp_alloc_device_default(self.device.context, size_in_bytes, None)
         # If the allocation fails, check if graph capture is active to raise an informative error.
         # We delay the capture check to avoid overhead.
