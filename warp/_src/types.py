@@ -3998,6 +3998,11 @@ class array(Array[DType, NDim]):
     def zero_(self):
         """Zero out the array entries."""
         self._apic_ensure_tracked()
+        if self.size == 0:
+            # Zero-size array: nothing to zero. Skip to avoid hipMemset(ptr, 0, 0)
+            # which returns hipErrorInvalidValue on ROCm.
+            self.mark_init()
+            return
         if self.is_contiguous:
             # simple memset is usually faster than generic fill
             self.device.memset(self.ptr, 0, self.size * type_size_in_bytes(self.dtype))
