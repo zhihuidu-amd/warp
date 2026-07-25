@@ -3855,18 +3855,23 @@ class Device:
                 self.is_ipc_supported = bool(ipc_support_api_query) if ipc_support_api_query >= 0 else None
             else:
                 self.is_ipc_supported = False
-            if warp.config.enable_mempools_at_init:
-                # enable if supported
+            if warp.config.enable_mempools_at_init and not self.is_hip:
+                # CUDA: enable if supported (standard behavior)
                 self.is_mempool_enabled = self.is_mempool_supported
-            elif self.is_hip and self.is_mempool_supported:
-                # HIP/ROCm: do NOT auto-enable mempool at device init.
-                # Reason: when PyTorch (lw torch 2.9.1+rocm7.2.0) is also loaded,
+            elif warp.config.enable_mempools_at_init and self.is_hip:
+                # HIP/ROCm: enable_mempools_at_init=True is the warp default, but
+                # on HIP it conflicts with PyTorch (lw torch 2.9.1+rocm7.2.0):
                 # both runtimes compete to own the HIP memory pool at init time,
                 # causing a null pointer fault (Memory access fault on address nil).
-                # Callers that need hipGraph must explicitly opt in AFTER both
-                # torch and warp are fully initialized:
-                #   wp.set_mempool_enabled(device, True)  # before ScopedCapture
-                # This matches the CUDA default (disabled unless enable_mempools_at_init).
+                # We require an explicit opt-in via env var WARP_HIP_MEMPOOL_ENABLE=1.
+                import os as _os
+                if _os.environ.get('WARP_HIP_MEMPOOL_ENABLE', '0') == '1':
+                    self.is_mempool_enabled = self.is_mempool_supported
+                else:
+                    self.is_mempool_enabled = False
+            elif self.is_hip and self.is_mempool_supported:
+                # HIP/ROCm: do NOT auto-enable mempool at device init by default.
+                # Use WARP_HIP_MEMPOOL_ENABLE=1 to opt in.
                 self.is_mempool_enabled = False
             else:
                 # disable by default
