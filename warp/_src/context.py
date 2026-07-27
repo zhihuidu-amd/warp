@@ -3857,6 +3857,9 @@ class Device:
                 self.is_ipc_supported = False
             if warp.config.enable_mempools_at_init:
                 # enable if supported
+                # HIP/ROCm: mempool conflicts with PyTorch ROCm allocator.
+            # Only enable when WARP_HIP_MEMPOOL_ENABLE=1 is explicitly set.
+            if _os.environ.get('WARP_HIP_MEMPOOL_ENABLE', '0') == '1':
                 self.is_mempool_enabled = self.is_mempool_supported
             else:
                 # disable by default
