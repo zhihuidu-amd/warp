@@ -3738,7 +3738,12 @@ class array(Array[DType, NDim]):
         if capacity > 0:
             if device.is_cuda:
                 with device.context_guard:
-                    ptr = allocator.allocate(capacity)
+                    # HIP/ROCm: hipMalloc(0) returns nullptr (unlike CUDA).
+            # Use 1-byte minimum so ptr is always valid/non-null on HIP.
+            if device.is_cuda and device.is_hip and capacity == 0:
+                ptr = allocator.allocate(1)
+            else:
+                ptr = allocator.allocate(capacity)
             else:
                 ptr = allocator.allocate(capacity)
         else:
@@ -4179,6 +4184,10 @@ class array(Array[DType, NDim]):
             apic_capture.track_array(self)
 
     def zero_(self):
+        # HIP/ROCm: hipMemsetAsync(size=0) returns hipErrorInvalidValue.
+        # Early-return to match CUDA no-op behavior for zero-size arrays.
+        if self.size == 0:
+            return
         """Zero out the array entries."""
         self._apic_ensure_tracked()
         if self.is_contiguous:
