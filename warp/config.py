@@ -221,6 +221,15 @@ Only affects systems with CUDA driver versions below 12.3.
 """
 
 enable_mempools_at_init: bool = True
+
+# Allow the user to override enable_mempools_at_init via an environment variable
+# before importing Warp. Particularly useful on AMD ROCm where enabling the HIP
+# memory pool conflicts with PyTorch's allocator when both are initialised in
+# the same process.  Set WARP_ENABLE_MEMPOOLS_AT_INIT=0 to disable.
+import os as _warp_os
+if _warp_os.environ.get("WARP_ENABLE_MEMPOOLS_AT_INIT", "").lower() in ("0", "false", "no"):
+    enable_mempools_at_init = False
+del _warp_os
 """Enable CUDA memory pools during device initialization when supported."""
 
 track_memory: bool = False

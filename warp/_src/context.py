@@ -3864,19 +3864,15 @@ class Device:
                 # CUDA: enable if supported (standard behavior)
                 self.is_mempool_enabled = self.is_mempool_supported
             elif warp.config.enable_mempools_at_init and self.is_hip:
-                # HIP/ROCm: enable_mempools_at_init=True is the warp default, but
-                # on HIP it conflicts with PyTorch (lw torch 2.9.1+rocm7.2.0):
-                # both runtimes compete to own the HIP memory pool at init time,
-                # causing a null pointer fault (Memory access fault on address nil).
-                # We require an explicit opt-in via env var WARP_HIP_MEMPOOL_ENABLE=1.
-                import os as _os
-                if _os.environ.get('WARP_HIP_MEMPOOL_ENABLE', '0') == '1':
-                    self.is_mempool_enabled = self.is_mempool_supported
-                else:
-                    self.is_mempool_enabled = False
+                # HIP/ROCm: respect warp.config.enable_mempools_at_init, which
+                # can be set via the WARP_ENABLE_MEMPOOLS_AT_INIT environment
+                # variable (see warp/config.py).  Defaults to True per upstream
+                # warp, but AMD users running alongside PyTorch-ROCm should set
+                # WARP_ENABLE_MEMPOOLS_AT_INIT=0 to avoid the HIP memory-pool
+                # conflict that causes a null-pointer fault at device init time.
+                self.is_mempool_enabled = self.is_mempool_supported
             elif self.is_hip and self.is_mempool_supported:
-                # HIP/ROCm: do NOT auto-enable mempool at device init by default.
-                # Use WARP_HIP_MEMPOOL_ENABLE=1 to opt in.
+                # HIP/ROCm: mempool disabled because enable_mempools_at_init=False.
                 self.is_mempool_enabled = False
             else:
                 # disable by default
