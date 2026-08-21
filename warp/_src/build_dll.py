@@ -318,6 +318,85 @@ def find_nvcc_executable(cuda_home) -> str:
     return nvcc_name
 
 
+def find_rocm_sdk(rocm_home: str | None = None) -> str | None:
+    """Find a ROCm installation that provides the HIP headers.
+
+    Search order mirrors :func:`find_nvcc_executable`: an explicit path first,
+    then the standard environment variables, then ``hipconfig``/``hipcc`` on
+    ``PATH``, then the default install location.
+
+    A candidate is only accepted if ``include/hip/hip_runtime.h`` exists under
+    it. Some distributions install ``hipcc`` into ``/usr/bin`` while keeping the
+    headers under ``/opt/rocm``; deriving the prefix from the compiler location
+    alone would yield ``/usr`` and the build would fail at the first include.
+
+    Args:
+        rocm_home: Explicit ROCm path, or ``None`` to search.
+
+    Returns:
+        Path to a usable ROCm installation, or ``None`` if none was found.
+    """
+
+    def _usable(path: str | None) -> str | None:
+        if path and os.path.isfile(os.path.join(path, "include", "hip", "hip_runtime.h")):
+            return path
+        return None
+
+    candidate = _usable(rocm_home)
+    if candidate:
+        return candidate
+
+    for var in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        candidate = _usable(os.environ.get(var))
+        if candidate:
+            return candidate
+
+    for tool in ("hipconfig", "hipcc"):
+        tool_path = shutil.which(tool)
+        if tool_path:
+            # <prefix>/bin/<tool> -> <prefix>
+            candidate = _usable(os.path.dirname(os.path.dirname(os.path.realpath(tool_path))))
+            if candidate:
+                return candidate
+
+    return _usable("/opt/rocm")
+
+
+def find_hipcc_executable(rocm_home: str | None) -> str:
+    """Find the ``hipcc`` compiler driver, preferring the one in ``rocm_home``."""
+    hipcc_name = "hipcc.exe" if os.name == "nt" else "hipcc"
+
+    if rocm_home:
+        hipcc_path = os.path.join(rocm_home, "bin", hipcc_name)
+        if os.path.exists(hipcc_path):
+            return quote(hipcc_path)
+
+    hipcc_in_path = shutil.which(hipcc_name)
+    if hipcc_in_path:
+        return hipcc_in_path
+
+    return hipcc_name
+
+
+def get_hip_offload_arches(args) -> list[str]:
+    """Resolve the AMD GPU architectures to compile for.
+
+    Unlike CUDA compute capabilities, which Warp represents as integers
+    (``sm_90`` is ``90``), AMD architectures are strings such as ``gfx942``.
+
+    Returns:
+        A list of ``gfx`` architecture names, never empty.
+    """
+    raw = getattr(args, "hip_arch", None) or os.environ.get("WARP_HIP_ARCH")
+    if raw:
+        arches = [a for a in raw.replace(";", ",").replace(" ", ",").split(",") if a]
+        if arches:
+            return arches
+
+    # CDNA3 (MI300X / MI325X) is the initial supported target.
+    return ["gfx942"]
+
+
 def quote(path):
     return '"' + path + '"'
 
@@ -615,7 +694,29 @@ def build_dll_for_arch(
 
     native_dir = os.path.join(warp_home, "native")
 
-    if cu_paths:
+    # HIP is an alternative device backend: the same .cu sources are compiled by
+    # hipcc instead of nvcc, with CUDA symbols translated by native/hip_util.h.
+    # When disabled (the default) nothing below this point changes.
+    rocm_home = find_rocm_sdk(getattr(args, "rocm_path", None)) if getattr(args, "hip", False) else None
+    hip_enabled = bool(cu_paths and rocm_home)
+    if getattr(args, "hip", False) and not rocm_home:
+        raise Exception(
+            "HIP build requested but no ROCm installation with include/hip/hip_runtime.h was found. "
+            "Set --rocm-path or ROCM_PATH."
+        )
+
+    if hip_enabled:
+        hipcc_cmd = find_hipcc_executable(rocm_home)
+        hipcc_opts = [
+            *[f"--offload-arch={a}" for a in get_hip_offload_arches(args)],
+            "-x hip",
+            "-std=c++17",
+            "-D__HIP_PLATFORM_AMD__",
+            "-fno-strict-aliasing",
+        ]
+        if args.fast_math:
+            hipcc_opts.append("-ffast-math")
+    elif cu_paths:
         # check CUDA Toolkit version
         ctk_version = get_cuda_toolkit_version(cuda_home)
         if ctk_version < MIN_CTK_VERSION:
@@ -867,6 +968,14 @@ def build_dll_for_arch(
             if cu_paths:
                 for cu_path in cu_paths:
                     cu_out = cu_path + _obj_tag + ".o"
+
+                    if hip_enabled:
+                        # hipcc compiles the same sources; CUDA symbols are
+                        # translated by native/hip_util.h.
+                        opt_flag = "-g -O0" if mode == "debug" else "-O3 -DNDEBUG"
+                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}" -I"{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
+                        cuda_cmds.append(cuda_cmd)
+                        continue
 
                     _nvcc_opts = [
                         opt.replace("@filename@", os.path.basename(cu_path).replace(".", "_")) for opt in nvcc_opts

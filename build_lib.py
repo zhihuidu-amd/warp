@@ -316,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to CUDA Toolkit installation (auto-detected via WARP_CUDA_PATH, CUDA_HOME, CUDA_PATH, or nvcc)",
     )
     group_toolchain.add_argument(
+        "--rocm-path",
+        type=str,
+        help="Path to ROCm installation (auto-detected via ROCM_PATH, ROCM_HOME, HIP_PATH, hipconfig, or hipcc)",
+    )
+    group_toolchain.add_argument(
         "--libmathdx-path",
         type=str,
         help="Path to NVIDIA libmathdx installation (optional if LIBMATHDX_HOME is set)",
@@ -328,6 +333,17 @@ def main(argv: list[str] | None = None) -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Build with CUDA support (auto-detects CUDA Toolkit). Use --no-cuda for a CPU-only build",
+    )
+    group_build.add_argument(
+        "--hip",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Build the device backend with HIP for AMD GPUs instead of CUDA (requires ROCm)",
+    )
+    group_build.add_argument(
+        "--hip-arch",
+        type=str,
+        help="Comma-separated AMD GPU architectures to target, e.g. 'gfx942'. Defaults to gfx942",
     )
     group_build.add_argument(
         "--clang-build-toolchain",
