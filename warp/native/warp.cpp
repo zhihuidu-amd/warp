@@ -151,6 +151,12 @@ int wp_is_error_output_enabled() { return int(wp::is_error_output_enabled()); }
 
 int wp_is_cuda_enabled() { return int(WP_ENABLE_CUDA); }
 
+#ifndef WP_ENABLE_HIP
+#define WP_ENABLE_HIP 0
+#endif
+
+int wp_is_hip_enabled() { return int(WP_ENABLE_HIP); }
+
 int wp_is_cuda_compatibility_enabled() { return int(WP_ENABLE_CUDA_COMPATIBILITY); }
 
 int wp_is_mathdx_enabled() { return int(WP_ENABLE_MATHDX); }

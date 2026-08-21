@@ -5634,8 +5634,23 @@ class Device:
 
     @property
     def is_cuda(self) -> bool:
-        """A boolean indicating whether the device is a CUDA device."""
+        """A boolean indicating whether the device is a CUDA device.
+
+        HIP devices report ``True`` as well: HIP is an alternative backend for the
+        same device abstraction, so code that branches on ``is_cuda`` keeps working
+        unchanged on AMD GPUs. Use :attr:`is_hip` to distinguish the backend.
+        """
         return self.ordinal >= 0
+
+    @property
+    def is_hip(self) -> bool:
+        """A boolean indicating whether the device is driven by the HIP backend.
+
+        Always ``False`` in CUDA builds. This is the backend, not the vendor: it
+        answers "was this library built against ROCm", which is what capability
+        checks need.
+        """
+        return self.ordinal >= 0 and runtime is not None and runtime.is_hip
 
     @property
     def is_capturing(self) -> bool:
@@ -7506,6 +7521,9 @@ class Runtime:
             self.core.wp_is_cuda_enabled.restype = ctypes.c_int
             self.core.wp_is_cuda_compatibility_enabled.argtypes = None
             self.core.wp_is_cuda_compatibility_enabled.restype = ctypes.c_int
+            if hasattr(self.core, "wp_is_hip_enabled"):
+                self.core.wp_is_hip_enabled.argtypes = None
+                self.core.wp_is_hip_enabled.restype = ctypes.c_int
             self.core.wp_is_mathdx_enabled.argtypes = None
             self.core.wp_is_mathdx_enabled.restype = ctypes.c_int
             self.core.wp_is_debug_enabled.argtypes = None
@@ -8076,6 +8094,14 @@ class Runtime:
 
         self.is_cuda_enabled = bool(self.core.wp_is_cuda_enabled())
         self.is_cuda_compatibility_enabled = bool(self.core.wp_is_cuda_compatibility_enabled())
+
+        # True when the device backend was built with HIP instead of CUDA.
+        # Queried defensively so a core library built before this symbol existed
+        # still loads.
+        try:
+            self.is_hip = bool(self.core.wp_is_hip_enabled())
+        except AttributeError:
+            self.is_hip = False
 
         self.toolkit_version = None  # CTK version used to build the core lib
         self.driver_version = None  # installed driver version

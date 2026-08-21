@@ -43,6 +43,8 @@ WP_API int wp_is_error_output_enabled();
 
 // whether Warp was compiled with CUDA support
 WP_API int wp_is_cuda_enabled();
+// whether the device backend was compiled with HIP (AMD) instead of CUDA
+WP_API int wp_is_hip_enabled();
 // whether Warp was compiled with enhanced CUDA compatibility
 WP_API int wp_is_cuda_compatibility_enabled();
 // whether Warp was compiled with MathDx support
