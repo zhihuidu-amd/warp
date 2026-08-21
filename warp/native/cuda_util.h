@@ -9,8 +9,14 @@
 
 #include <vector>
 
+#if WP_ENABLE_HIP
+// hip_util.h maps the CUDA driver and runtime API onto their HIP equivalents,
+// so the rest of this header compiles unchanged on ROCm.
+#include "hip_util.h"
+#else
 #include <cudaTypedefs.h>
 #include <cuda_runtime_api.h>
+#endif
 #include <stdio.h>
 
 #define check_cuda(code) (check_cuda_result(code, __FUNCTION__, __FILE__, __LINE__))

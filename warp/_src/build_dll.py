@@ -775,6 +775,9 @@ def build_dll_for_arch(
     # Host translation units need this too: headers shared by the host and device
     # sides (tile.h) select CUDA or HIP runtime headers on it.
     hip_enabled_define = "WP_ENABLE_HIP=1" if hip_enabled else "WP_ENABLE_HIP=0"
+    # hip_util.h and the ROCm headers require the platform macro on every
+    # translation unit that includes them, host ones included.
+    hip_platform_define = " -D__HIP_PLATFORM_AMD__" if hip_enabled else ""
 
     if args.libmathdx_path:
         libmathdx_includes = f' -I"{args.libmathdx_path}/include"'
@@ -934,7 +937,7 @@ def build_dll_for_arch(
             else:
                 version = ""
 
-        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{hip_enabled_define} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
+        cpp_flags = f'-Werror -Wuninitialized {version} --std=c++17 -fno-rtti -D{cuda_enabled} -D{hip_enabled_define}{hip_platform_define} -D{mathdx_enabled} -D{cuda_compat_enabled} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -I"{native_dir}" {includes} '
 
         if mode == "debug":
             cpp_flags += "-Og -g -D_DEBUG -DWP_ENABLE_DEBUG=1"
