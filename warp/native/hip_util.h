@@ -456,6 +456,11 @@ struct CUmemcpyAttributes {
 #endif  // HIP_VERSION >= 70100000
 using CUDA_ARRAY_DESCRIPTOR = HIP_ARRAY_DESCRIPTOR;
 using CUDA_ARRAY3D_DESCRIPTOR = HIP_ARRAY3D_DESCRIPTOR;
+using CUmipmappedArray = hipmipmappedArray;
+using CUlaunchConfig = hipLaunchConfig_t;
+#ifndef cudaStreamGetId
+#define cudaStreamGetId hipStreamGetId
+#endif  // cudaStreamGetId
 #if HIP_VERSION >= 70000000
 using CUDA_MEMCPY2D = hip_Memcpy2D;
 using CUDA_MEMCPY3D = HIP_MEMCPY3D;
