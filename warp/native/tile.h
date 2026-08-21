@@ -19,6 +19,10 @@
 // NVRTC has built-in float4; Clang CUDA JIT defines it in cuda_crt.h
 #if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
 // float4 already available
+#elif WP_ENABLE_HIP
+// HIP: hip_util.h maps the CUDA runtime headers onto their HIP equivalents.
+// Host translation units on ROCm have no cuda_runtime.h to include.
+#include "hip_util.h"
 #else
 // NVCC: Include vector_types.h to get float4
 #include <cuda_runtime.h>
