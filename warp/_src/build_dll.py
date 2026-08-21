@@ -913,7 +913,10 @@ def build_dll_for_arch(
         # Build include paths for LLVM and CUDA
         llvm_include_paths = get_llvm_include_paths(args, warp_home_path, mode, arch)
         cpp_includes = format_include_paths(llvm_include_paths, "-I")
-        cuda_includes = f' -I"{cuda_home}/include"' if cu_paths else ""
+        if hip_enabled:
+            cuda_includes = f' -I"{rocm_home}/include"'
+        else:
+            cuda_includes = f' -I"{cuda_home}/include"' if cu_paths else ""
         includes = cpp_includes + cuda_includes
 
         if sys.platform == "darwin":
@@ -997,7 +1000,11 @@ def build_dll_for_arch(
 
                     ld_inputs.append(quote(cu_out))
 
-                if args.use_dynamic_cuda:
+                if hip_enabled:
+                    # HIP provides the runtime and the runtime compiler; there is
+                    # no CUDA toolkit to link against.
+                    ld_inputs.append(f'-L"{rocm_home}/lib" -lamdhip64 -lhiprtc -lpthread -ldl -lrt')
+                elif args.use_dynamic_cuda:
                     ld_inputs.append(
                         f'-L"{cuda_home}/lib64" -L"{cuda_home}/lib" -lcudart -lnvrtc -lnvptxcompiler_static -lpthread -ldl -lrt'
                     )

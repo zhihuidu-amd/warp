@@ -566,7 +566,11 @@ def main(argv: list[str] | None = None) -> int:
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 
-        if args.cuda_path is None:
+        # A HIP build compiles the same device sources with hipcc, so it does not
+        # need a CUDA Toolkit. Without this, a ROCm-only machine has
+        # args.cuda_path is None and the device sources are dropped, silently
+        # producing a CPU-only library.
+        if args.cuda_path is None and not args.hip:
             if args.cuda:
                 print("Warning: CUDA toolchain not found, building without CUDA support")
             warp_cu_paths = None
