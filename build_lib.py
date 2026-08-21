@@ -488,8 +488,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.cuda_path:
             args.cuda_path = find_cuda_sdk()
 
+        # libmathdx is a CUDA-only library (cuBLASDx/cuFFTDx), so a HIP build
+        # cannot use it. Disable it rather than failing on a missing dependency
+        # that does not apply to this backend.
+        if args.hip:
+            args.use_libmathdx = False
+            args.libmathdx_path = None
         # libmathdx needs to be used with a build of Warp that supports CUDA
-        if args.use_libmathdx:
+        elif args.use_libmathdx:
             if not args.libmathdx_path and args.cuda_path:
                 major, _ = build_dll.get_cuda_toolkit_version(args.cuda_path)
                 args.libmathdx_path = find_libmathdx(major, base_path)
