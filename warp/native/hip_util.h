@@ -432,9 +432,7 @@ using CUuuid = hipUUID;
 using CUdevice_attribute = hipDeviceAttribute_t;
 using CUipcEventHandle = hipIpcEventHandle_t;
 using CUipcMemHandle = hipIpcMemHandle_t;
-// Must match the 'unsigned long long' out-parameters in the HIP API exactly;
-// uint64_t is a distinct type from unsigned long long on LP64.
-using cuuint64_t = unsigned long long;
+using cuuint64_t = uint64_t;
 using CUgraphicsResource = hipGraphicsResource_t;
 using CUarray = hipArray_t;
 using CUtexObject = hipTextureObject_t;
@@ -778,7 +776,21 @@ WP_HIP_PFN(hipStreamCreateWithPriority, PFN_cuStreamCreateWithPriority_v5050);
 WP_HIP_PFN(hipStreamCreateWithFlags, PFN_cuStreamCreate_v2000);
 WP_HIP_PFN(hipStreamDestroy, PFN_cuStreamDestroy_v4000);
 // v2 is the form that reports the graph and its dependencies.
-WP_HIP_PFN(hipStreamGetCaptureInfo_v2, PFN_cuStreamGetCaptureInfo_v11030);
+// Warp passes a uint64_t* for the capture id while HIP declares
+// 'unsigned long long*'. They have the same width but are distinct types on
+// LP64, so bridge them here rather than casting at the call site.
+static inline hipError_t wp_hipStreamGetCaptureInfo(
+    hipStream_t stream, hipStreamCaptureStatus* captureStatus_out, cuuint64_t* id_out,
+    hipGraph_t* graph_out, const hipGraphNode_t** dependencies_out, size_t* numDependencies_out)
+{
+    unsigned long long id = 0;
+    hipError_t status = hipStreamGetCaptureInfo_v2(
+        stream, captureStatus_out, &id, graph_out, dependencies_out, numDependencies_out);
+    if (id_out)
+        *id_out = static_cast<cuuint64_t>(id);
+    return status;
+}
+WP_HIP_PFN(wp_hipStreamGetCaptureInfo, PFN_cuStreamGetCaptureInfo_v11030);
 // StreamGetCtx has no ROCm equivalent; the entry point resolves to
 // null at runtime and callers already handle a missing driver entry.
 using PFN_cuStreamGetCtx_v9020 = hipError_t (*)(hipStream_t, hipCtx_t*);
