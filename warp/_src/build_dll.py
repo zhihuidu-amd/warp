@@ -716,7 +716,9 @@ def build_dll_for_arch(
             # (the kernel launch macros, the CRT shims, the AOT helpers). Define
             # it so those paths are selected, as they are for nvcc and for
             # Clang's CUDA mode.
-            "-D__CUDACC__",
+            # Note: __CUDACC__ is added per-file below, not here. Warp's device
+            # headers gate on it, but it also makes rocThrust select its CUDA
+            # backend, which is wrong on ROCm.
             # __brkpt() is a CUDA device builtin with no HIP equivalent. It is
             # reached from builtin.h, which does not include the shim, so it has
             # to be defined on the command line. __builtin_trap() lowers to the
@@ -996,7 +998,15 @@ def build_dll_for_arch(
                         # hipcc compiles the same sources; CUDA symbols are
                         # translated by native/hip_util.h.
                         opt_flag = "-g -O0" if mode == "debug" else "-O3 -DNDEBUG"
-                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}/hip_compat" -I"{native_dir}" -isystem "{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
+                        # Warp's device headers gate the kernel launch macros,
+                        # the CRT shims and the AOT helpers on __CUDACC__, so
+                        # hipcc has to define it. rocThrust also keys on it and
+                        # would select its CUDA backend, whose iterators are
+                        # host-only, so the sources that use Thrust are built
+                        # without it. hipcc compiles kernels either way.
+                        uses_thrust = os.path.basename(cu_path) in ("deterministic.cu",)
+                        cudacc_flag = "" if uses_thrust else " -D__CUDACC__"
+                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)}{cudacc_flag} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}/hip_compat" -I"{native_dir}" -isystem "{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
                         cuda_cmds.append(cuda_cmd)
                         continue
 
