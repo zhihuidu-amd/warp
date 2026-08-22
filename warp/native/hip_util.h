@@ -442,7 +442,7 @@ using CUgraphNodeType = hipGraphNodeType;
 using CUgraphNodeParams = void;
 using CUgraphEdgeData = void;
 using CUstreamCaptureStatus = hipStreamCaptureStatus;
-using CUjit_option = int;
+using CUjit_option = hipJitOption;
 using CUpointer_attribute = hipPointer_attribute;
 using CUfunction_attribute = hipFuncAttribute;
 // HIP has no equivalent of the CUDA `CUoccupancyB2DSize` callback (the only HIP
@@ -625,7 +625,8 @@ WP_HIP_PFN(hipDeviceGet, PFN_cuDeviceGet_v2000);
 WP_HIP_PFN(hipDevicePrimaryCtxRelease, PFN_cuDevicePrimaryCtxRelease_v11000);
 WP_HIP_PFN(hipDevicePrimaryCtxRetain, PFN_cuDevicePrimaryCtxRetain_v7000);
 WP_HIP_PFN(hipDriverGetVersion, PFN_cuDriverGetVersion_v2020);
-WP_HIP_PFN(hipEventCreate, PFN_cuEventCreate_v2000);
+// The driver API always takes flags; the plain HIP spelling does not.
+WP_HIP_PFN(hipEventCreateWithFlags, PFN_cuEventCreate_v2000);
 WP_HIP_PFN(hipEventDestroy, PFN_cuEventDestroy_v4000);
 WP_HIP_PFN(hipEventQuery, PFN_cuEventQuery_v2000);
 WP_HIP_PFN(hipEventRecordWithFlags, PFN_cuEventRecordWithFlags_v11010);
@@ -650,7 +651,17 @@ static inline hipError_t wp_hipDrvGetErrorString(hipError_t e, const char** s)
 WP_HIP_PFN(wp_hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
 WP_HIP_PFN(wp_hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
-WP_HIP_PFN(hipGraphAddNode, PFN_cuGraphAddNode_v12030);
+// The driver API passes per-edge data and puts the dependency count after
+// it; HIP has no edge-data parameter. Drop it: Warp only uses default
+// edges here, which is what HIP assumes.
+static inline hipError_t wp_hipGraphAddNode(
+    hipGraphNode_t* pGraphNode, hipGraph_t graph, const hipGraphNode_t* pDependencies,
+    const CUgraphEdgeData* edgeData, size_t numDependencies, hipGraphNodeParams* nodeParams)
+{
+    (void)edgeData;
+    return hipGraphAddNode(pGraphNode, graph, pDependencies, numDependencies, nodeParams);
+}
+WP_HIP_PFN(wp_hipGraphAddNode, PFN_cuGraphAddNode_v12030);
 WP_HIP_PFN(hipGraphNodeGetDependentNodes, PFN_cuGraphNodeGetDependentNodes_v10000);
 WP_HIP_PFN(hipGraphNodeGetType, PFN_cuGraphNodeGetType_v10000);
 // The GL interop entry points live in hip_gl_interop.h, which requires an
@@ -696,7 +707,16 @@ WP_HIP_PFN(hipMipmappedArrayDestroy, PFN_cuMipmappedArrayDestroy_v5000);
 WP_HIP_PFN(hipMipmappedArrayGetLevel, PFN_cuMipmappedArrayGetLevel_v5000);
 WP_HIP_PFN(hipModuleGetFunction, PFN_cuModuleGetFunction_v2000);
 WP_HIP_PFN(hipModuleGetGlobal, PFN_cuModuleGetGlobal_v3020);
-WP_HIP_PFN(hipModuleLoadDataEx, PFN_cuModuleLoadDataEx_v2010);
+// hipModuleLoadDataEx is fine once CUjit_option aliases hipJitOption; the
+// wrapper exists only to keep the driver-API parameter spelling.
+static inline hipError_t wp_hipModuleLoadDataEx(
+    hipModule_t* module, const void* image, unsigned int numOptions, CUjit_option* options,
+    void** optionValues)
+{
+    return hipModuleLoadDataEx(
+        module, image, numOptions, options, optionValues);
+}
+WP_HIP_PFN(wp_hipModuleLoadDataEx, PFN_cuModuleLoadDataEx_v2010);
 WP_HIP_PFN(hipModuleUnload, PFN_cuModuleUnload_v2000);
 // OccupancyMaxActiveClusters has no ROCm equivalent; the entry point resolves to
 // null at runtime and callers already handle a missing driver entry.
@@ -709,9 +729,10 @@ WP_HIP_PFN(hipPointerGetAttribute, PFN_cuPointerGetAttribute_v4000);
 WP_HIP_PFN(hipProfilerStart, PFN_cuProfilerStart_v4000);
 WP_HIP_PFN(hipProfilerStop, PFN_cuProfilerStop_v4000);
 WP_HIP_PFN(hipStreamCreateWithPriority, PFN_cuStreamCreateWithPriority_v5050);
-WP_HIP_PFN(hipStreamCreate, PFN_cuStreamCreate_v2000);
+WP_HIP_PFN(hipStreamCreateWithFlags, PFN_cuStreamCreate_v2000);
 WP_HIP_PFN(hipStreamDestroy, PFN_cuStreamDestroy_v4000);
-WP_HIP_PFN(hipStreamGetCaptureInfo, PFN_cuStreamGetCaptureInfo_v11030);
+// v2 is the form that reports the graph and its dependencies.
+WP_HIP_PFN(hipStreamGetCaptureInfo_v2, PFN_cuStreamGetCaptureInfo_v11030);
 // StreamGetCtx has no ROCm equivalent; the entry point resolves to
 // null at runtime and callers already handle a missing driver entry.
 using PFN_cuStreamGetCtx_v9020 = hipError_t (*)(hipStream_t, hipCtx_t*);
