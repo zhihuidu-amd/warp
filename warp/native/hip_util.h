@@ -419,10 +419,10 @@ using nvrtcProgram = hiprtcProgram;
 using nvrtcResult = hiprtcResult;
 using CUresult = hipError_t;
 using CUdevice = hipDevice_t;
-struct HipContext {
-    int device;
-};
-using CUcontext = HipContext*;
+// HIP has a real context type (hipCtx_t). Aliasing CUcontext to a stand-in
+// struct would compile but then fail to convert wherever the driver entry
+// points expect the genuine type.
+using CUcontext = hipCtx_t;
 using CUstream = hipStream_t;
 using CUevent = hipEvent_t;
 using CUmodule = hipModule_t;
@@ -636,8 +636,19 @@ WP_HIP_PFN(hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
 // The driver API returns the message through an out-parameter, while the HIP
 // runtime spellings return it directly. ROCm provides the driver-style forms
 // under hipDrv*.
-WP_HIP_PFN(hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
-WP_HIP_PFN(hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
+// hipDrv* are marked nodiscard, but the driver API's callers legitimately
+// ignore the status and just check whether the out-parameter was filled.
+// Wrap them so the discarded result is explicit and local.
+static inline hipError_t wp_hipDrvGetErrorName(hipError_t e, const char** s)
+{
+    return hipDrvGetErrorName(e, s);
+}
+static inline hipError_t wp_hipDrvGetErrorString(hipError_t e, const char** s)
+{
+    return hipDrvGetErrorString(e, s);
+}
+WP_HIP_PFN(wp_hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
+WP_HIP_PFN(wp_hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 WP_HIP_PFN(hipGraphAddNode, PFN_cuGraphAddNode_v12030);
 WP_HIP_PFN(hipGraphNodeGetDependentNodes, PFN_cuGraphNodeGetDependentNodes_v10000);
