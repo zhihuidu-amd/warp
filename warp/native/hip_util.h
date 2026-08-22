@@ -444,7 +444,9 @@ using CUgraphEdgeData = void;
 using CUstreamCaptureStatus = hipStreamCaptureStatus;
 using CUjit_option = hipJitOption;
 using CUpointer_attribute = hipPointer_attribute;
-using CUfunction_attribute = hipFuncAttribute;
+// hipFunction_attribute is the query enum used by hipFuncGetAttribute;
+// hipFuncAttribute is the distinct enum used when setting attributes.
+using CUfunction_attribute = hipFunction_attribute;
 // HIP has no equivalent of the CUDA `CUoccupancyB2DSize` callback (the only HIP
 // equivalents take a fixed `size_t` shared-memory size). Provide a stub typedef
 // so call sites that reference the type compile under HIP; HIP code paths must
@@ -640,16 +642,24 @@ WP_HIP_PFN(hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
 // hipDrv* are marked nodiscard, but the driver API's callers legitimately
 // ignore the status and just check whether the out-parameter was filled.
 // Wrap them so the discarded result is explicit and local.
-static inline hipError_t wp_hipDrvGetErrorName(hipError_t e, const char** s)
+static inline void wp_hipDrvGetErrorName(hipError_t e, const char** s)
 {
-    return hipDrvGetErrorName(e, s);
+    if (hipDrvGetErrorName(e, s) != hipSuccess && s)
+        *s = nullptr;
 }
-static inline hipError_t wp_hipDrvGetErrorString(hipError_t e, const char** s)
+static inline void wp_hipDrvGetErrorString(hipError_t e, const char** s)
 {
-    return hipDrvGetErrorString(e, s);
+    if (hipDrvGetErrorString(e, s) != hipSuccess && s)
+        *s = nullptr;
 }
-WP_HIP_PFN(wp_hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
-WP_HIP_PFN(wp_hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
+// ROCm marks the whole hipError_t enum [[nodiscard]], and Warp builds with
+// -Werror, so a caller that legitimately ignores the status (it tests the
+// out-parameter instead) would not compile. These two entry points are the
+// only such callers, so give them a void-returning type: the status is
+// consumed inside the wrapper, and the out-parameter stays NULL on failure,
+// which is exactly what the caller checks.
+using PFN_cuGetErrorName_v6000 = void (*)(hipError_t, const char**);
+using PFN_cuGetErrorString_v6000 = void (*)(hipError_t, const char**);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 // The driver API passes per-edge data and puts the dependency count after
 // it; HIP has no edge-data parameter. Drop it: Warp only uses default
@@ -683,7 +693,9 @@ WP_HIP_PFN(hipIpcGetEventHandle, PFN_cuIpcGetEventHandle_v4010);
 WP_HIP_PFN(hipIpcGetMemHandle, PFN_cuIpcGetMemHandle_v4010);
 WP_HIP_PFN(hipIpcOpenEventHandle, PFN_cuIpcOpenEventHandle_v4010);
 WP_HIP_PFN(hipIpcOpenMemHandle, PFN_cuIpcOpenMemHandle_v11000);
-WP_HIP_PFN(hipLaunchKernel, PFN_cuLaunchKernel_v4000);
+// The driver API launches a hipFunction_t with flat dimensions; the runtime
+// spelling hipLaunchKernel takes a host symbol and dim3.
+WP_HIP_PFN(hipModuleLaunchKernel, PFN_cuLaunchKernel_v4000);
 WP_HIP_PFN(hipMemGetInfo, PFN_cuMemGetInfo_v3020);
 // The driver-API copies take a descriptor struct, while the HIP runtime
 // spellings (hipMemcpy2D/hipMemcpy3D) take loose arguments or a different
