@@ -405,7 +405,40 @@ using cudaMemAccessDesc = hipMemAccessDesc;
 using cudaUserObject_t = hipUserObject_t;
 using cudaResourceDesc = hipResourceDesc;
 using cudaArray_t = hipArray_t;
-using cudaSurfaceObject_t = hipSurfaceObject_t;
+
+// ---------------------------------------------------------------------------
+// Opaque handles: integer in CUDA, pointer in HIP.
+//
+// CUDA types CUdeviceptr, CUtexObject and cudaSurfaceObject_t as unsigned
+// integers, so Warp moves them through uint64_t with static_cast. HIP types
+// them as pointers, where that cast is ill-formed. These wrappers hold the HIP
+// pointer but convert to and from integers, so the existing casts stay valid
+// and no call site changes.
+// ---------------------------------------------------------------------------
+template <typename T>
+struct wp_hip_handle {
+    T value{};
+
+    wp_hip_handle() = default;
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    constexpr wp_hip_handle(T v) : value(v) {}
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    explicit constexpr wp_hip_handle(unsigned long long v) : value(reinterpret_cast<T>(v)) {}
+
+    constexpr operator T() const { return value; }
+    explicit constexpr operator unsigned long long() const
+    {
+        return reinterpret_cast<unsigned long long>(value);
+    }
+    explicit constexpr operator unsigned long() const
+    {
+        return reinterpret_cast<unsigned long>(value);
+    }
+    constexpr bool operator==(const wp_hip_handle& o) const { return value == o.value; }
+    constexpr bool operator!=(const wp_hip_handle& o) const { return value != o.value; }
+};
+
+using cudaSurfaceObject_t = wp_hip_handle<hipSurfaceObject_t>;
 #ifndef cudaResourceTypeArray
 #define cudaResourceTypeArray hipResourceTypeArray
 #endif  // cudaResourceTypeArray
@@ -427,7 +460,9 @@ using CUstream = hipStream_t;
 using CUevent = hipEvent_t;
 using CUmodule = hipModule_t;
 using CUfunction = hipFunction_t;
-using CUdeviceptr = hipDeviceptr_t;
+// CUDA types this as an unsigned integer and Warp casts uint64_t to it;
+// HIP types it as void*, where that cast is ill-formed.
+using CUdeviceptr = wp_hip_handle<hipDeviceptr_t>;
 using CUuuid = hipUUID;
 using CUdevice_attribute = hipDeviceAttribute_t;
 using CUipcEventHandle = hipIpcEventHandle_t;
@@ -435,7 +470,7 @@ using CUipcMemHandle = hipIpcMemHandle_t;
 using cuuint64_t = uint64_t;
 using CUgraphicsResource = hipGraphicsResource_t;
 using CUarray = hipArray_t;
-using CUtexObject = hipTextureObject_t;
+using CUtexObject = wp_hip_handle<hipTextureObject_t>;
 using CUgraph = hipGraph_t;
 using CUgraphNode = hipGraphNode_t;
 using CUgraphNodeType = hipGraphNodeType;
@@ -846,3 +881,7 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 #ifndef cudaGraphMemFreeNodeGetParams
 #define cudaGraphMemFreeNodeGetParams hipGraphMemFreeNodeGetParams
 #endif  // cudaGraphMemFreeNodeGetParams
+
+#ifndef CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
+#define CU_RESOURCE_TYPE_MIPMAPPED_ARRAY HIP_RESOURCE_TYPE_MIPMAPPED_ARRAY
+#endif  // CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
