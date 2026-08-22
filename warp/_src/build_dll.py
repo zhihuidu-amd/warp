@@ -712,6 +712,11 @@ def build_dll_for_arch(
             "-x hip",
             "-std=c++17",
             "-D__HIP_PLATFORM_AMD__",
+            # hipcc defines __HIPCC__; Warp's device headers gate on __CUDACC__
+            # (the kernel launch macros, the CRT shims, the AOT helpers). Define
+            # it so those paths are selected, as they are for nvcc and for
+            # Clang's CUDA mode.
+            "-D__CUDACC__",
             "-fno-strict-aliasing",
         ]
         if args.fast_math:
@@ -921,7 +926,7 @@ def build_dll_for_arch(
         llvm_include_paths = get_llvm_include_paths(args, warp_home_path, mode, arch)
         cpp_includes = format_include_paths(llvm_include_paths, "-I")
         if hip_enabled:
-            cuda_includes = f' -I"{rocm_home}/include"'
+            cuda_includes = f' -I"{native_dir}/hip_compat" -I"{rocm_home}/include"'
         else:
             cuda_includes = f' -I"{cuda_home}/include"' if cu_paths else ""
         includes = cpp_includes + cuda_includes
@@ -983,7 +988,7 @@ def build_dll_for_arch(
                         # hipcc compiles the same sources; CUDA symbols are
                         # translated by native/hip_util.h.
                         opt_flag = "-g -O0" if mode == "debug" else "-O3 -DNDEBUG"
-                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}" -I"{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
+                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}/hip_compat" -I"{native_dir}" -I"{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
                         cuda_cmds.append(cuda_cmd)
                         continue
 
