@@ -7,11 +7,17 @@
 // run-length encode). ROCm ships hipCUB, which mirrors that API on top of
 // rocPRIM, so the sources compile unchanged once cub:: resolves to hipcub::.
 //
-// The include lives here rather than in hip_util.h so that it is pulled in only
-// by the translation units that actually use CUB, and always at file scope.
+// The vendored cuBQL is already HIP-aware and declares `namespace cub` itself
+// when __HIPCC__ is set, so the alias here is guarded to avoid redeclaring it
+// as a different kind of entity.
 
 #pragma once
 
 #include <hipcub/hipcub.hpp>
 
-namespace cub = hipcub;
+#ifndef WP_HIP_CUB_NAMESPACE_ALIASED
+#define WP_HIP_CUB_NAMESPACE_ALIASED
+namespace cub {
+using namespace hipcub;
+}
+#endif  // WP_HIP_CUB_NAMESPACE_ALIASED
