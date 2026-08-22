@@ -936,3 +936,19 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 #ifndef CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
 #define CU_RESOURCE_TYPE_MIPMAPPED_ARRAY HIP_RESOURCE_TYPE_MIPMAPPED_ARRAY
 #endif  // CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
+
+#ifndef cudaThreadExchangeStreamCaptureMode
+#define cudaThreadExchangeStreamCaptureMode hipThreadExchangeStreamCaptureMode
+#endif  // cudaThreadExchangeStreamCaptureMode
+#ifndef cudaStreamCaptureMode
+#define cudaStreamCaptureMode hipStreamCaptureMode
+#endif  // cudaStreamCaptureMode
+#ifndef cudaStreamCaptureModeRelaxed
+#define cudaStreamCaptureModeRelaxed hipStreamCaptureModeRelaxed
+#endif  // cudaStreamCaptureModeRelaxed
+#ifndef cudaStreamCaptureModeThreadLocal
+#define cudaStreamCaptureModeThreadLocal hipStreamCaptureModeThreadLocal
+#endif  // cudaStreamCaptureModeThreadLocal
+#ifndef cudaStreamCaptureModeGlobal
+#define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
+#endif  // cudaStreamCaptureModeGlobal
