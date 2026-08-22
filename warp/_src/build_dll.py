@@ -717,6 +717,14 @@ def build_dll_for_arch(
             # it so those paths are selected, as they are for nvcc and for
             # Clang's CUDA mode.
             "-D__CUDACC__",
+            # __brkpt() is a CUDA device builtin with no HIP equivalent. It is
+            # reached from builtin.h, which does not include the shim, so it has
+            # to be defined on the command line. __builtin_trap() lowers to the
+            # same s_trap instruction on AMDGCN.
+            "-D__brkpt()=__builtin_trap()",
+            # hipcc's bundled LLVM carries a CUDA-targeted Thrust that expects
+            # CUB's internals. rocThrust is the right implementation here.
+            "-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_HIP",
             "-fno-strict-aliasing",
         ]
         if args.fast_math:
