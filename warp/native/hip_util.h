@@ -650,28 +650,31 @@ WP_HIP_PFN(wp_hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
 // hipDrv* are marked nodiscard, but the driver API's callers legitimately
 // ignore the status and just check whether the out-parameter was filled.
 // Wrap them so the discarded result is explicit and local.
-enum wp_hip_status : int {};
-static inline wp_hip_status wp_hipDrvGetErrorName(hipError_t e, const char** s)
+static inline hipError_t wp_hipDrvGetErrorName(hipError_t e, const char** s)
 {
     hipError_t status = hipDrvGetErrorName(e, s);
     if (status != hipSuccess && s)
         *s = nullptr;
-    return static_cast<wp_hip_status>(status);
+    return status;
 }
-static inline wp_hip_status wp_hipDrvGetErrorString(hipError_t e, const char** s)
+static inline hipError_t wp_hipDrvGetErrorString(hipError_t e, const char** s)
 {
     hipError_t status = hipDrvGetErrorString(e, s);
     if (status != hipSuccess && s)
         *s = nullptr;
-    return static_cast<wp_hip_status>(status);
+    return status;
 }
 // ROCm marks the whole hipError_t enum [[nodiscard]] on C++17 with no opt-out
-// macro, and Warp calls these two entry points for effect in check_cu_result
-// while also returning their status elsewhere. A distinct enum with the same
-// underlying values satisfies both: it converts to and from hipError_t, and it
-// is not nodiscard.
-using PFN_cuGetErrorName_v6000 = wp_hip_status (*)(hipError_t, const char**);
-using PFN_cuGetErrorString_v6000 = wp_hip_status (*)(hipError_t, const char**);
+// macro. Warp both returns these statuses and calls the accessors purely for
+// effect, and a conditional expression requires the same enum on both arms, so
+// the type has to stay hipError_t. Warp builds with -Werror, so relax just
+// this diagnostic for translation units that use the shim; the codebase still
+// checks statuses where they matter, via check_cu/check_cuda.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic ignored "-Wunused-result"
+#endif
+WP_HIP_PFN(wp_hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
+WP_HIP_PFN(wp_hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 // The driver API passes per-edge data and puts the dependency count after
 // it; HIP has no edge-data parameter. Drop it: Warp only uses default
