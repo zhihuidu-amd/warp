@@ -38,6 +38,7 @@ vocabulary, in the same way `WP_ENABLE_CUDA` already gates the CUDA layer.
   interop surfaces are staged separately (see "Staging").
 - Support for AMD consumer (RDNA) parts in the first increment; CDNA (`gfx942`)
   is the initial target.
+- Deterministic reduction on ROCm (see Key Implementation Details).
 - Any change to CUDA behavior, performance, or codegen.
 
 ## Design
@@ -124,6 +125,20 @@ place the proposal changes an existing signature: the annotation widens to
 `ptr is None` is not a reliable emptiness test. Warp already prefers `size == 0` for
 this after [GH-1702]. No further change is needed here; it is noted because it is a
 recurring source of platform-specific bugs.
+
+**Deterministic reduction is not built on ROCm.** `deterministic.cu` needs
+`__CUDACC__` for Warp's own device code (`wp::half`'s operators, `wp::min`/`max`
+in `builtin.h`), but rocThrust keys on the same macro in
+`thrust/detail/config/compiler.h` and then selects `THRUST_DEVICE_COMPILER_NVCC`,
+falling back to a CPU tag whose iterator operators are host-only. Every use of a
+transform iterator in device code then fails to compile.
+
+The macro cannot be worked around from the build: `THRUST_DEVICE_COMPILER` has no
+`#ifndef` guard, and the tag is baked into the iterator type when it is formed, so
+setting `THRUST_DEVICE_SYSTEM` afterwards does not help. The file is therefore
+excluded from HIP builds and the feature reports as unavailable, as it already
+does on the CPU. This looks like a rocThrust issue worth reporting upstream to
+AMD rather than something to work around in Warp.
 
 **Graph capture.** ROCm supports stream capture but not conditional graph nodes.
 Warp's conditional-node paths are therefore gated on a runtime capability query, and

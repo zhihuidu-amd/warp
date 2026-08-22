@@ -1751,6 +1751,12 @@ def run_sort_reduce(
     """Execute post-kernel sort-reduce for all scatter targets."""
     import warp  # noqa: PLC0415
 
+    if not hasattr(runtime.core, "wp_deterministic_sort_reduce_workspace_size"):
+        raise RuntimeError(
+            "Deterministic reduction is not available in this build of Warp. "
+            "The native implementation is not currently compiled for HIP devices."
+        )
+
     workspaces = []
     determinism_mode_id = int(determinism_mode)
 

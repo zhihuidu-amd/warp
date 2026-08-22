@@ -596,6 +596,24 @@ def main(argv: list[str] | None = None) -> int:
                 "native/volume_builder.cu",
                 "native/warp.cu",
             ]
+            if args.hip:
+                # Deterministic reduction is not yet available on ROCm.
+                #
+                # deterministic.cu needs __CUDACC__ for Warp's own device code
+                # (wp::half's operators, wp::min/max in builtin.h), but
+                # rocThrust keys on the same macro at
+                # thrust/detail/config/compiler.h and then selects
+                # THRUST_DEVICE_COMPILER_NVCC, falling back to a CPU tag whose
+                # iterator operators are host-only. THRUST_DEVICE_COMPILER has
+                # no #ifndef guard, so it cannot be overridden, and the tag is
+                # baked into the iterator type when it is formed, so setting
+                # THRUST_DEVICE_SYSTEM afterwards does not help either.
+                #
+                # Excluding the file keeps the rest of the backend working. The
+                # deterministic entry points resolve to null and Warp reports
+                # the feature as unsupported, as it already does on the CPU.
+                cuda_sources = [cu for cu in cuda_sources if not cu.endswith("deterministic.cu")]
+
             warp_cu_paths = [os.path.join(build_path, cu) for cu in cuda_sources]
 
             # libmathdx is only needed when building with CUDA

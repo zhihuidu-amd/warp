@@ -6965,53 +6965,57 @@ class Runtime:
 
             # Deterministic mode: sort scatter records and apply
             # component-wise segmented reduction for scalar/composite values.
-            self.core.wp_deterministic_sort_reduce_workspace_size.argtypes = [
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-            ]
-            self.core.wp_deterministic_sort_reduce_workspace_size.restype = ctypes.c_size_t
+            # Deterministic reduction is not built on ROCm: deterministic.cu
+            # cannot be compiled there yet (see build_lib.py). Bind these only
+            # when the symbols are present so the library still loads.
+            if hasattr(self.core, "wp_deterministic_sort_reduce_workspace_size"):
+                self.core.wp_deterministic_sort_reduce_workspace_size.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                ]
+                self.core.wp_deterministic_sort_reduce_workspace_size.restype = ctypes.c_size_t
 
-            self.core.wp_deterministic_sort_reduce_device.argtypes = [
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_size_t,
-            ]
-            self.core.wp_deterministic_sort_reduce_device.restype = None
-            self.core.wp_deterministic_counter_scan_workspace_size.argtypes = [
-                ctypes.c_int,
-            ]
-            self.core.wp_deterministic_counter_scan_workspace_size.restype = ctypes.c_size_t
-            self.core.wp_deterministic_counter_scan_device.argtypes = [
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_size_t,
-            ]
-            self.core.wp_deterministic_counter_scan_device.restype = None
-            self.core.wp_deterministic_counter_writeback_device.argtypes = [
-                ctypes.c_uint64,
-                ctypes.c_int,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                ctypes.c_int,
-            ]
-            self.core.wp_deterministic_counter_writeback_device.restype = None
+                self.core.wp_deterministic_sort_reduce_device.argtypes = [
+                    ctypes.c_uint64,
+                    ctypes.c_uint64,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_size_t,
+                ]
+                self.core.wp_deterministic_sort_reduce_device.restype = None
+                self.core.wp_deterministic_counter_scan_workspace_size.argtypes = [
+                    ctypes.c_int,
+                ]
+                self.core.wp_deterministic_counter_scan_workspace_size.restype = ctypes.c_size_t
+                self.core.wp_deterministic_counter_scan_device.argtypes = [
+                    ctypes.c_uint64,
+                    ctypes.c_uint64,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_uint64,
+                    ctypes.c_uint64,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_size_t,
+                ]
+                self.core.wp_deterministic_counter_scan_device.restype = None
+                self.core.wp_deterministic_counter_writeback_device.argtypes = [
+                    ctypes.c_uint64,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_uint64,
+                    ctypes.c_int,
+                ]
+                self.core.wp_deterministic_counter_writeback_device.restype = None
 
             self.core.wp_bvh_create_host.restype = ctypes.c_uint64
             self.core.wp_bvh_create_host.argtypes = [
