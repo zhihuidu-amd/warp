@@ -426,11 +426,11 @@ struct wp_hip_handle {
     explicit constexpr wp_hip_handle(unsigned long long v) : value(reinterpret_cast<T>(v)) {}
 
     constexpr operator T() const { return value; }
-    explicit constexpr operator unsigned long long() const
+    constexpr operator unsigned long long() const
     {
         return reinterpret_cast<unsigned long long>(value);
     }
-    explicit constexpr operator unsigned long() const
+    constexpr operator unsigned long() const
     {
         return reinterpret_cast<unsigned long>(value);
     }
@@ -443,7 +443,7 @@ using cudaSurfaceObject_t = wp_hip_handle<hipSurfaceObject_t>;
 #define cudaResourceTypeArray hipResourceTypeArray
 #endif  // cudaResourceTypeArray
 #ifndef cudaCreateSurfaceObject
-#define cudaCreateSurfaceObject hipCreateSurfaceObject
+#define cudaCreateSurfaceObject wp_hipCreateSurfaceObject
 #endif  // cudaCreateSurfaceObject
 #ifndef cudaDestroySurfaceObject
 #define cudaDestroySurfaceObject hipDestroySurfaceObject
@@ -624,6 +624,13 @@ using CUDA_RESOURCE_VIEW_DESC = hipResourceViewDesc;
 // wp_hip_handle<T> is a standard-layout struct whose only member is a T, so a
 // wp_hip_handle<T>* is layout-compatible with a T* and the reinterpret_cast is
 // well-defined. Wrapping here keeps the casts out of the call sites.
+static inline hipError_t wp_hipCreateSurfaceObject(
+    wp_hip_handle<hipSurfaceObject_t>* pSurfObject, const hipResourceDesc* pResDesc)
+{
+    return hipCreateSurfaceObject(
+        reinterpret_cast<hipSurfaceObject_t*>(pSurfObject), pResDesc);
+}
+
 static inline hipError_t wp_hipMemcpyBatchAsync(
     wp_hip_handle<hipDeviceptr_t>* dsts, wp_hip_handle<hipDeviceptr_t>* srcs, size_t* sizes,
     size_t count, hipMemcpyAttributes* attrs, size_t* attrsIdxs, size_t numAttrs, size_t* failIdx,
