@@ -8,6 +8,8 @@
 #include <hip/hip_runtime_api.h>
 #include <hip/hiprtc.h>
 
+#include "hip_compat/hip_device_compat.h"
+
 #ifndef HIP_VERSION
 #if defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR) && defined(HIP_VERSION_PATCH)
 #define HIP_VERSION (HIP_VERSION_MAJOR * 10000000 + HIP_VERSION_MINOR * 100000 + HIP_VERSION_PATCH)

@@ -988,7 +988,7 @@ def build_dll_for_arch(
                         # hipcc compiles the same sources; CUDA symbols are
                         # translated by native/hip_util.h.
                         opt_flag = "-g -O0" if mode == "debug" else "-O3 -DNDEBUG"
-                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}/hip_compat" -I"{native_dir}" -I"{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
+                        cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}/hip_compat" -I"{native_dir}" -isystem "{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
                         cuda_cmds.append(cuda_cmd)
                         continue
 

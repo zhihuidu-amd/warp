@@ -1,0 +1,12 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// HIP compatibility shim: satisfies `#include <cuda/std/utility>` on ROCm.
+//
+// ROCm has no libcu++. The device code that reaches these headers uses the
+// standard-library facilities, which HIP supports directly in device code, so
+// forwarding to <utility> is sufficient.
+
+#pragma once
+
+#include <utility>
