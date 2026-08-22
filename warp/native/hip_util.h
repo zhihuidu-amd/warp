@@ -344,8 +344,11 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef CUDA_ERROR_PEER_ACCESS_NOT_ENABLED
 #define CUDA_ERROR_PEER_ACCESS_NOT_ENABLED hipErrorPeerAccessNotEnabled
 #endif  // CUDA_ERROR_PEER_ACCESS_NOT_ENABLED
+// ROCm has no equivalent of cudaErrorCallRequiresNewerDriver. Map it to the
+// generic "not supported" status so comparisons against it stay well-formed
+// and simply never match.
 #ifndef cudaErrorCallRequiresNewerDriver
-#define cudaErrorCallRequiresNewerDriver hipErrorCallRequiresNewerDriver
+#define cudaErrorCallRequiresNewerDriver hipErrorNotSupported
 #endif  // cudaErrorCallRequiresNewerDriver
 #ifndef CU_STREAM_DEFAULT
 #define CU_STREAM_DEFAULT hipStreamDefault
@@ -630,8 +633,11 @@ WP_HIP_PFN(hipEventRecord, PFN_cuEventRecord_v2000);
 WP_HIP_PFN(hipEventSynchronize, PFN_cuEventSynchronize_v2000);
 WP_HIP_PFN(hipFuncGetAttribute, PFN_cuFuncGetAttribute_v2020);
 WP_HIP_PFN(hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
-WP_HIP_PFN(hipGetErrorName, PFN_cuGetErrorName_v6000);
-WP_HIP_PFN(hipGetErrorString, PFN_cuGetErrorString_v6000);
+// The driver API returns the message through an out-parameter, while the HIP
+// runtime spellings return it directly. ROCm provides the driver-style forms
+// under hipDrv*.
+WP_HIP_PFN(hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
+WP_HIP_PFN(hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 WP_HIP_PFN(hipGraphAddNode, PFN_cuGraphAddNode_v12030);
 WP_HIP_PFN(hipGraphNodeGetDependentNodes, PFN_cuGraphNodeGetDependentNodes_v10000);
@@ -657,13 +663,24 @@ WP_HIP_PFN(hipIpcOpenEventHandle, PFN_cuIpcOpenEventHandle_v4010);
 WP_HIP_PFN(hipIpcOpenMemHandle, PFN_cuIpcOpenMemHandle_v11000);
 WP_HIP_PFN(hipLaunchKernel, PFN_cuLaunchKernel_v4000);
 WP_HIP_PFN(hipMemGetInfo, PFN_cuMemGetInfo_v3020);
-WP_HIP_PFN(hipMemcpy2DAsync, PFN_cuMemcpy2DAsync_v3020);
-WP_HIP_PFN(hipMemcpy2D, PFN_cuMemcpy2D_v3020);
-WP_HIP_PFN(hipMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
-WP_HIP_PFN(hipMemcpy3D, PFN_cuMemcpy3D_v3020);
+// The driver-API copies take a descriptor struct, while the HIP runtime
+// spellings (hipMemcpy2D/hipMemcpy3D) take loose arguments or a different
+// struct. ROCm provides the descriptor forms under hipMemcpyParam2D* and
+// hipDrvMemcpy3D*.
+WP_HIP_PFN(hipMemcpyParam2DAsync, PFN_cuMemcpy2DAsync_v3020);
+WP_HIP_PFN(hipMemcpyParam2D, PFN_cuMemcpy2D_v3020);
+WP_HIP_PFN(hipDrvMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
+WP_HIP_PFN(hipDrvMemcpy3D, PFN_cuMemcpy3D_v3020);
 WP_HIP_PFN(hipMemcpyBatchAsync, PFN_cuMemcpyBatchAsync_v12080);
 WP_HIP_PFN(hipMemcpyPeerAsync, PFN_cuMemcpyPeerAsync_v4000);
-WP_HIP_PFN(hipMipmappedArrayCreate, PFN_cuMipmappedArrayCreate_v5000);
+// HIP takes a non-const descriptor here where the driver API takes const.
+// Adapt in one place rather than casting at the call site.
+static inline hipError_t wp_hipMipmappedArrayCreate(
+    hipMipmappedArray_t* pHandle, const HIP_ARRAY3D_DESCRIPTOR* pDesc, unsigned int numMipmapLevels)
+{
+    return hipMipmappedArrayCreate(pHandle, const_cast<HIP_ARRAY3D_DESCRIPTOR*>(pDesc), numMipmapLevels);
+}
+WP_HIP_PFN(wp_hipMipmappedArrayCreate, PFN_cuMipmappedArrayCreate_v5000);
 WP_HIP_PFN(hipMipmappedArrayDestroy, PFN_cuMipmappedArrayDestroy_v5000);
 WP_HIP_PFN(hipMipmappedArrayGetLevel, PFN_cuMipmappedArrayGetLevel_v5000);
 WP_HIP_PFN(hipModuleGetFunction, PFN_cuModuleGetFunction_v2000);
@@ -694,3 +711,21 @@ WP_HIP_PFN(hipStreamUpdateCaptureDependencies, PFN_cuStreamUpdateCaptureDependen
 WP_HIP_PFN(hipStreamWaitEvent, PFN_cuStreamWaitEvent_v3020);
 WP_HIP_PFN(hipTexObjectCreate, PFN_cuTexObjectCreate_v5000);
 WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
+
+// Graph memory-node inspection: the enumerators and accessors Warp uses to walk
+// a captured graph looking for allocation nodes.
+#ifndef CU_GRAPH_NODE_TYPE_MEM_ALLOC
+#define CU_GRAPH_NODE_TYPE_MEM_ALLOC hipGraphNodeTypeMemAlloc
+#endif  // CU_GRAPH_NODE_TYPE_MEM_ALLOC
+#ifndef CU_GRAPH_NODE_TYPE_MEM_FREE
+#define CU_GRAPH_NODE_TYPE_MEM_FREE hipGraphNodeTypeMemFree
+#endif  // CU_GRAPH_NODE_TYPE_MEM_FREE
+#ifndef cudaMemAllocNodeParams
+#define cudaMemAllocNodeParams hipMemAllocNodeParams
+#endif  // cudaMemAllocNodeParams
+#ifndef cudaGraphMemAllocNodeGetParams
+#define cudaGraphMemAllocNodeGetParams hipGraphMemAllocNodeGetParams
+#endif  // cudaGraphMemAllocNodeGetParams
+#ifndef cudaGraphMemFreeNodeGetParams
+#define cudaGraphMemFreeNodeGetParams hipGraphMemFreeNodeGetParams
+#endif  // cudaGraphMemFreeNodeGetParams
