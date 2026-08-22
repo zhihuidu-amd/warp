@@ -954,3 +954,45 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 #define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
 #endif  // cudaStreamCaptureModeGlobal
 
+// Device attributes and managed-memory queries used by wp_cuda_device_*.
+#ifndef CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS
+#define CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS hipDeviceAttributeConcurrentManagedAccess
+#endif  // CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS
+#ifndef CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST
+#define CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST     hipDeviceAttributeDirectManagedMemAccessFromHost
+#endif  // CU_DEVICE_ATTRIBUTE_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST
+#ifndef CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED
+#define CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED hipDeviceAttributeHostNativeAtomicSupported
+#endif  // CU_DEVICE_ATTRIBUTE_HOST_NATIVE_ATOMIC_SUPPORTED
+#ifndef CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY
+#define CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY hipDeviceAttributeManagedMemory
+#endif  // CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY
+#ifndef CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS
+#define CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS hipDeviceAttributePageableMemoryAccess
+#endif  // CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS
+#ifndef cudaMemAttachGlobal
+#define cudaMemAttachGlobal hipMemAttachGlobal
+#endif  // cudaMemAttachGlobal
+#ifndef cudaStreamGetFlags
+#define cudaStreamGetFlags hipStreamGetFlags
+#endif  // cudaStreamGetFlags
+
+// Graph memory pool accounting.
+#ifndef cudaDeviceGetGraphMemAttribute
+#define cudaDeviceGetGraphMemAttribute hipDeviceGetGraphMemAttribute
+#endif  // cudaDeviceGetGraphMemAttribute
+#ifndef cudaDeviceGraphMemTrim
+#define cudaDeviceGraphMemTrim hipDeviceGraphMemTrim
+#endif  // cudaDeviceGraphMemTrim
+#ifndef cudaGraphMemAttrUsedMemCurrent
+#define cudaGraphMemAttrUsedMemCurrent hipGraphMemAttrUsedMemCurrent
+#endif  // cudaGraphMemAttrUsedMemCurrent
+#ifndef cudaGraphMemAttrUsedMemHigh
+#define cudaGraphMemAttrUsedMemHigh hipGraphMemAttrUsedMemHigh
+#endif  // cudaGraphMemAttrUsedMemHigh
+#ifndef cudaGraphMemAttrReservedMemCurrent
+#define cudaGraphMemAttrReservedMemCurrent hipGraphMemAttrReservedMemCurrent
+#endif  // cudaGraphMemAttrReservedMemCurrent
+#ifndef cudaGraphMemAttrReservedMemHigh
+#define cudaGraphMemAttrReservedMemHigh hipGraphMemAttrReservedMemHigh
+#endif  // cudaGraphMemAttrReservedMemHigh
