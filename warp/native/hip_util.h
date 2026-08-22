@@ -650,27 +650,28 @@ WP_HIP_PFN(wp_hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
 // hipDrv* are marked nodiscard, but the driver API's callers legitimately
 // ignore the status and just check whether the out-parameter was filled.
 // Wrap them so the discarded result is explicit and local.
-static inline int wp_hipDrvGetErrorName(hipError_t e, const char** s)
+enum wp_hip_status : int {};
+static inline wp_hip_status wp_hipDrvGetErrorName(hipError_t e, const char** s)
 {
     hipError_t status = hipDrvGetErrorName(e, s);
     if (status != hipSuccess && s)
         *s = nullptr;
-    return static_cast<int>(status);
+    return static_cast<wp_hip_status>(status);
 }
-static inline int wp_hipDrvGetErrorString(hipError_t e, const char** s)
+static inline wp_hip_status wp_hipDrvGetErrorString(hipError_t e, const char** s)
 {
     hipError_t status = hipDrvGetErrorString(e, s);
     if (status != hipSuccess && s)
         *s = nullptr;
-    return static_cast<int>(status);
+    return static_cast<wp_hip_status>(status);
 }
-// ROCm marks the whole hipError_t enum [[nodiscard]] on C++17, with no opt-out
-// macro. Warp returns these statuses from cuGetErrorName_f/cuGetErrorString_f
-// but also calls them for effect in check_cu_result. Returning the underlying
-// integer type keeps both uses well-formed: it converts to CUresult where a
-// status is wanted, and carries no nodiscard where it is not.
-using PFN_cuGetErrorName_v6000 = int (*)(hipError_t, const char**);
-using PFN_cuGetErrorString_v6000 = int (*)(hipError_t, const char**);
+// ROCm marks the whole hipError_t enum [[nodiscard]] on C++17 with no opt-out
+// macro, and Warp calls these two entry points for effect in check_cu_result
+// while also returning their status elsewhere. A distinct enum with the same
+// underlying values satisfies both: it converts to and from hipError_t, and it
+// is not nodiscard.
+using PFN_cuGetErrorName_v6000 = wp_hip_status (*)(hipError_t, const char**);
+using PFN_cuGetErrorString_v6000 = wp_hip_status (*)(hipError_t, const char**);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 // The driver API passes per-edge data and puts the dependency count after
 // it; HIP has no edge-data parameter. Drop it: Warp only uses default
