@@ -578,3 +578,97 @@ using CUDA_RESOURCE_VIEW_DESC = hipResourceViewDesc;
 #ifndef CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED
 #define CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED ((CUdevice_attribute)-1)
 #endif  // CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED
+
+// ---------------------------------------------------------------------------
+// Versioned driver-API function pointer types.
+//
+// Warp declares its driver entry points using the explicitly versioned names
+// from CUDA's cudaTypedefs.h (PFN_cuFoo_vNNNN). ROCm has no equivalent header,
+// so each name is synthesised from the HIP function it already aliases to.
+// decltype keeps the signature in step with ROCm automatically: if HIP changes
+// one, this stops compiling rather than silently mismatching.
+// ---------------------------------------------------------------------------
+#define WP_HIP_PFN(_fn, _pfn) using _pfn = decltype(&_fn)
+
+WP_HIP_PFN(cuArray3DCreate, PFN_cuArray3DCreate_v3020);
+WP_HIP_PFN(cuArray3DGetDescriptor, PFN_cuArray3DGetDescriptor_v3020);
+WP_HIP_PFN(cuArrayCreate, PFN_cuArrayCreate_v3020);
+WP_HIP_PFN(cuArrayDestroy, PFN_cuArrayDestroy_v2000);
+WP_HIP_PFN(cuCtxCreate, PFN_cuCtxCreate_v3020);
+WP_HIP_PFN(cuCtxDestroy, PFN_cuCtxDestroy_v4000);
+WP_HIP_PFN(cuCtxDisablePeerAccess, PFN_cuCtxDisablePeerAccess_v4000);
+WP_HIP_PFN(cuCtxEnablePeerAccess, PFN_cuCtxEnablePeerAccess_v4000);
+WP_HIP_PFN(cuCtxGetCurrent, PFN_cuCtxGetCurrent_v4000);
+WP_HIP_PFN(cuCtxGetDevice, PFN_cuCtxGetDevice_v2000);
+WP_HIP_PFN(cuCtxPopCurrent, PFN_cuCtxPopCurrent_v4000);
+WP_HIP_PFN(cuCtxPushCurrent, PFN_cuCtxPushCurrent_v4000);
+WP_HIP_PFN(cuCtxSetCurrent, PFN_cuCtxSetCurrent_v4000);
+WP_HIP_PFN(cuCtxSynchronize, PFN_cuCtxSynchronize_v2000);
+WP_HIP_PFN(cuDeviceCanAccessPeer, PFN_cuDeviceCanAccessPeer_v4000);
+WP_HIP_PFN(cuDeviceGetAttribute, PFN_cuDeviceGetAttribute_v2000);
+WP_HIP_PFN(cuDeviceGetCount, PFN_cuDeviceGetCount_v2000);
+WP_HIP_PFN(cuDeviceGetName, PFN_cuDeviceGetName_v2000);
+WP_HIP_PFN(cuDeviceGetUuid, PFN_cuDeviceGetUuid_v11040);
+WP_HIP_PFN(cuDeviceGet, PFN_cuDeviceGet_v2000);
+WP_HIP_PFN(cuDevicePrimaryCtxRelease, PFN_cuDevicePrimaryCtxRelease_v11000);
+WP_HIP_PFN(cuDevicePrimaryCtxRetain, PFN_cuDevicePrimaryCtxRetain_v7000);
+WP_HIP_PFN(cuDriverGetVersion, PFN_cuDriverGetVersion_v2020);
+WP_HIP_PFN(cuEventCreate, PFN_cuEventCreate_v2000);
+WP_HIP_PFN(cuEventDestroy, PFN_cuEventDestroy_v4000);
+WP_HIP_PFN(cuEventQuery, PFN_cuEventQuery_v2000);
+WP_HIP_PFN(cuEventRecordWithFlags, PFN_cuEventRecordWithFlags_v11010);
+WP_HIP_PFN(cuEventRecord, PFN_cuEventRecord_v2000);
+WP_HIP_PFN(cuEventSynchronize, PFN_cuEventSynchronize_v2000);
+WP_HIP_PFN(cuFuncGetAttribute, PFN_cuFuncGetAttribute_v2020);
+WP_HIP_PFN(cuFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
+WP_HIP_PFN(cuGetErrorName, PFN_cuGetErrorName_v6000);
+WP_HIP_PFN(cuGetErrorString, PFN_cuGetErrorString_v6000);
+WP_HIP_PFN(cuGetProcAddress, PFN_cuGetProcAddress_v12000);
+WP_HIP_PFN(cuGraphAddNode, PFN_cuGraphAddNode_v12030);
+WP_HIP_PFN(cuGraphNodeGetDependentNodes, PFN_cuGraphNodeGetDependentNodes_v10000);
+WP_HIP_PFN(cuGraphNodeGetType, PFN_cuGraphNodeGetType_v10000);
+WP_HIP_PFN(cuGraphicsGLRegisterBuffer, PFN_cuGraphicsGLRegisterBuffer_v3000);
+WP_HIP_PFN(cuGraphicsGLRegisterImage, PFN_cuGraphicsGLRegisterImage_v3000);
+WP_HIP_PFN(cuGraphicsMapResources, PFN_cuGraphicsMapResources_v3000);
+WP_HIP_PFN(cuGraphicsResourceGetMappedPointer, PFN_cuGraphicsResourceGetMappedPointer_v3020);
+WP_HIP_PFN(cuGraphicsSubResourceGetMappedArray, PFN_cuGraphicsSubResourceGetMappedArray_v3000);
+WP_HIP_PFN(cuGraphicsUnmapResources, PFN_cuGraphicsUnmapResources_v3000);
+WP_HIP_PFN(cuGraphicsUnregisterResource, PFN_cuGraphicsUnregisterResource_v3000);
+WP_HIP_PFN(cuInit, PFN_cuInit_v2000);
+WP_HIP_PFN(cuIpcCloseMemHandle, PFN_cuIpcCloseMemHandle_v4010);
+WP_HIP_PFN(cuIpcGetEventHandle, PFN_cuIpcGetEventHandle_v4010);
+WP_HIP_PFN(cuIpcGetMemHandle, PFN_cuIpcGetMemHandle_v4010);
+WP_HIP_PFN(cuIpcOpenEventHandle, PFN_cuIpcOpenEventHandle_v4010);
+WP_HIP_PFN(cuIpcOpenMemHandle, PFN_cuIpcOpenMemHandle_v11000);
+WP_HIP_PFN(cuLaunchKernel, PFN_cuLaunchKernel_v4000);
+WP_HIP_PFN(cuMemGetInfo, PFN_cuMemGetInfo_v3020);
+WP_HIP_PFN(cuMemcpy2DAsync, PFN_cuMemcpy2DAsync_v3020);
+WP_HIP_PFN(cuMemcpy2D, PFN_cuMemcpy2D_v3020);
+WP_HIP_PFN(cuMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
+WP_HIP_PFN(cuMemcpy3D, PFN_cuMemcpy3D_v3020);
+WP_HIP_PFN(cuMemcpyBatchAsync, PFN_cuMemcpyBatchAsync_v12080);
+WP_HIP_PFN(cuMemcpyPeerAsync, PFN_cuMemcpyPeerAsync_v4000);
+WP_HIP_PFN(cuMipmappedArrayCreate, PFN_cuMipmappedArrayCreate_v5000);
+WP_HIP_PFN(cuMipmappedArrayDestroy, PFN_cuMipmappedArrayDestroy_v5000);
+WP_HIP_PFN(cuMipmappedArrayGetLevel, PFN_cuMipmappedArrayGetLevel_v5000);
+WP_HIP_PFN(cuModuleGetFunction, PFN_cuModuleGetFunction_v2000);
+WP_HIP_PFN(cuModuleGetGlobal, PFN_cuModuleGetGlobal_v3020);
+WP_HIP_PFN(cuModuleLoadDataEx, PFN_cuModuleLoadDataEx_v2010);
+WP_HIP_PFN(cuModuleUnload, PFN_cuModuleUnload_v2000);
+WP_HIP_PFN(cuOccupancyMaxActiveClusters, PFN_cuOccupancyMaxActiveClusters_v11070);
+WP_HIP_PFN(cuOccupancyMaxPotentialBlockSize, PFN_cuOccupancyMaxPotentialBlockSize_v6050);
+WP_HIP_PFN(cuPointerGetAttribute, PFN_cuPointerGetAttribute_v4000);
+WP_HIP_PFN(cuProfilerStart, PFN_cuProfilerStart_v4000);
+WP_HIP_PFN(cuProfilerStop, PFN_cuProfilerStop_v4000);
+WP_HIP_PFN(cuStreamCreateWithPriority, PFN_cuStreamCreateWithPriority_v5050);
+WP_HIP_PFN(cuStreamCreate, PFN_cuStreamCreate_v2000);
+WP_HIP_PFN(cuStreamDestroy, PFN_cuStreamDestroy_v4000);
+WP_HIP_PFN(cuStreamGetCaptureInfo, PFN_cuStreamGetCaptureInfo_v11030);
+WP_HIP_PFN(cuStreamGetCtx, PFN_cuStreamGetCtx_v9020);
+WP_HIP_PFN(cuStreamGetPriority, PFN_cuStreamGetPriority_v5050);
+WP_HIP_PFN(cuStreamQuery, PFN_cuStreamQuery_v2000);
+WP_HIP_PFN(cuStreamSynchronize, PFN_cuStreamSynchronize_v2000);
+WP_HIP_PFN(cuStreamUpdateCaptureDependencies, PFN_cuStreamUpdateCaptureDependencies_v11030);
+WP_HIP_PFN(cuStreamWaitEvent, PFN_cuStreamWaitEvent_v3020);
+WP_HIP_PFN(cuTexObjectCreate, PFN_cuTexObjectCreate_v5000);
+WP_HIP_PFN(cuTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
