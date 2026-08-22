@@ -996,3 +996,49 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 #ifndef cudaGraphMemAttrReservedMemHigh
 #define cudaGraphMemAttrReservedMemHigh hipGraphMemAttrReservedMemHigh
 #endif  // cudaGraphMemAttrReservedMemHigh
+
+// Empty graph nodes and the capture-dependency setter both exist on ROCm.
+#ifndef cudaGraphAddEmptyNode
+#define cudaGraphAddEmptyNode hipGraphAddEmptyNode
+#endif  // cudaGraphAddEmptyNode
+#ifndef CU_STREAM_SET_CAPTURE_DEPENDENCIES
+#define CU_STREAM_SET_CAPTURE_DEPENDENCIES hipStreamSetCaptureDependencies
+#endif  // CU_STREAM_SET_CAPTURE_DEPENDENCIES
+
+// Conditional graph nodes have NO ROCm equivalent.
+//
+// CUDA 12.4+ can embed an if/while node whose body is re-evaluated during
+// replay. HIP has no such node type, which is why a data-dependent loop has to
+// be captured as a static graph on AMD.
+//
+// Warp already gates the feature at runtime:
+// warp._src.context.is_conditional_graph_supported() requires a CUDA Toolkit
+// and driver of 12.4+, and on HIP the toolkit version is derived from
+// HIP_VERSION and never satisfies that, so these paths are unreachable. The
+// declarations exist only so the file compiles; the handle constructor reports
+// failure, so a path reached in error fails loudly rather than silently
+// building a graph with no condition.
+using cudaGraphConditionalHandle = unsigned long long;
+
+static inline hipError_t cudaGraphConditionalHandleCreate(cudaGraphConditionalHandle* handle, hipGraph_t graph,
+                                                          unsigned int default_value = 0,
+                                                          unsigned int flags = 0)
+{
+    (void)graph;
+    (void)default_value;
+    (void)flags;
+    if (handle) {
+        *handle = 0;
+    }
+    return hipErrorNotSupported;
+}
+
+#ifndef CU_GRAPH_NODE_TYPE_CONDITIONAL
+#define CU_GRAPH_NODE_TYPE_CONDITIONAL ((hipGraphNodeType)-1)
+#endif  // CU_GRAPH_NODE_TYPE_CONDITIONAL
+#ifndef CU_GRAPH_COND_TYPE_IF
+#define CU_GRAPH_COND_TYPE_IF 0
+#endif  // CU_GRAPH_COND_TYPE_IF
+#ifndef CU_GRAPH_COND_TYPE_WHILE
+#define CU_GRAPH_COND_TYPE_WHILE 1
+#endif  // CU_GRAPH_COND_TYPE_WHILE
