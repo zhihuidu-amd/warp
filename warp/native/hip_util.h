@@ -614,7 +614,8 @@ WP_HIP_PFN(hipCtxSetCurrent, PFN_cuCtxSetCurrent_v4000);
 WP_HIP_PFN(hipCtxSynchronize, PFN_cuCtxSynchronize_v2000);
 WP_HIP_PFN(hipDeviceCanAccessPeer, PFN_cuDeviceCanAccessPeer_v4000);
 WP_HIP_PFN(hipDeviceGetAttribute, PFN_cuDeviceGetAttribute_v2000);
-WP_HIP_PFN(hipDeviceGetCount, PFN_cuDeviceGetCount_v2000);
+// ROCm spells this hipGetDeviceCount, not hipDeviceGetCount.
+WP_HIP_PFN(hipGetDeviceCount, PFN_cuDeviceGetCount_v2000);
 WP_HIP_PFN(hipDeviceGetName, PFN_cuDeviceGetName_v2000);
 WP_HIP_PFN(hipDeviceGetUuid, PFN_cuDeviceGetUuid_v11040);
 WP_HIP_PFN(hipDeviceGet, PFN_cuDeviceGet_v2000);
@@ -635,8 +636,14 @@ WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 WP_HIP_PFN(hipGraphAddNode, PFN_cuGraphAddNode_v12030);
 WP_HIP_PFN(hipGraphNodeGetDependentNodes, PFN_cuGraphNodeGetDependentNodes_v10000);
 WP_HIP_PFN(hipGraphNodeGetType, PFN_cuGraphNodeGetType_v10000);
-WP_HIP_PFN(hipGraphicsGLRegisterBuffer, PFN_cuGraphicsGLRegisterBuffer_v3000);
-WP_HIP_PFN(hipGraphicsGLRegisterImage, PFN_cuGraphicsGLRegisterImage_v3000);
+// The GL interop entry points live in hip_gl_interop.h, which requires an
+// OpenGL header to be included first. Warp resolves these dynamically and
+// handles a null entry point, so declare the types without adding a GL
+// build dependency.
+using PFN_cuGraphicsGLRegisterBuffer_v3000 =
+    hipError_t (*)(hipGraphicsResource**, unsigned int, unsigned int);
+using PFN_cuGraphicsGLRegisterImage_v3000 =
+    hipError_t (*)(hipGraphicsResource**, unsigned int, unsigned int, unsigned int);
 WP_HIP_PFN(hipGraphicsMapResources, PFN_cuGraphicsMapResources_v3000);
 WP_HIP_PFN(hipGraphicsResourceGetMappedPointer, PFN_cuGraphicsResourceGetMappedPointer_v3020);
 WP_HIP_PFN(hipGraphicsSubResourceGetMappedArray, PFN_cuGraphicsSubResourceGetMappedArray_v3000);
