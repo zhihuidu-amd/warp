@@ -619,6 +619,48 @@ using CUDA_RESOURCE_VIEW_DESC = hipResourceViewDesc;
 #define CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED ((CUdevice_attribute)-1)
 #endif  // CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED
 
+
+// The driver entry points below take these handles by pointer. A
+// wp_hip_handle<T> is a standard-layout struct whose only member is a T, so a
+// wp_hip_handle<T>* is layout-compatible with a T* and the reinterpret_cast is
+// well-defined. Wrapping here keeps the casts out of the call sites.
+static inline hipError_t wp_hipMemcpyBatchAsync(
+    wp_hip_handle<hipDeviceptr_t>* dsts, wp_hip_handle<hipDeviceptr_t>* srcs, size_t* sizes,
+    size_t count, hipMemcpyAttributes* attrs, size_t* attrsIdxs, size_t numAttrs, size_t* failIdx,
+    hipStream_t stream)
+{
+    return hipMemcpyBatchAsync(
+        reinterpret_cast<void**>(dsts), reinterpret_cast<void**>(srcs), sizes, count, attrs,
+        attrsIdxs, numAttrs, failIdx, stream);
+}
+
+static inline hipError_t wp_hipGraphicsResourceGetMappedPointer(
+    wp_hip_handle<hipDeviceptr_t>* pDevPtr, size_t* pSize, hipGraphicsResource_t resource)
+{
+    return hipGraphicsResourceGetMappedPointer(
+        reinterpret_cast<void**>(pDevPtr), pSize, resource);
+}
+
+static inline hipError_t wp_hipModuleGetGlobal(
+    wp_hip_handle<hipDeviceptr_t>* dptr, size_t* bytes, hipModule_t hmod, const char* name)
+{
+    return hipModuleGetGlobal(reinterpret_cast<hipDeviceptr_t*>(dptr), bytes, hmod, name);
+}
+
+static inline hipError_t wp_hipIpcOpenMemHandle(
+    wp_hip_handle<hipDeviceptr_t>* pdptr, hipIpcMemHandle_t handle, unsigned int flags)
+{
+    return hipIpcOpenMemHandle(reinterpret_cast<void**>(pdptr), handle, flags);
+}
+
+static inline hipError_t wp_hipTexObjectCreate(
+    wp_hip_handle<hipTextureObject_t>* pTexObject, const HIP_RESOURCE_DESC* pResDesc,
+    const HIP_TEXTURE_DESC* pTexDesc, const HIP_RESOURCE_VIEW_DESC* pResViewDesc)
+{
+    return hipTexObjectCreate(
+        reinterpret_cast<hipTextureObject_t*>(pTexObject), pResDesc, pTexDesc, pResViewDesc);
+}
+
 // ---------------------------------------------------------------------------
 // Versioned driver-API function pointer types.
 //
@@ -733,7 +775,7 @@ using PFN_cuGraphicsGLRegisterBuffer_v3000 =
 using PFN_cuGraphicsGLRegisterImage_v3000 =
     hipError_t (*)(hipGraphicsResource**, unsigned int, unsigned int, unsigned int);
 WP_HIP_PFN(hipGraphicsMapResources, PFN_cuGraphicsMapResources_v3000);
-WP_HIP_PFN(hipGraphicsResourceGetMappedPointer, PFN_cuGraphicsResourceGetMappedPointer_v3020);
+WP_HIP_PFN(wp_hipGraphicsResourceGetMappedPointer, PFN_cuGraphicsResourceGetMappedPointer_v3020);
 WP_HIP_PFN(hipGraphicsSubResourceGetMappedArray, PFN_cuGraphicsSubResourceGetMappedArray_v3000);
 WP_HIP_PFN(hipGraphicsUnmapResources, PFN_cuGraphicsUnmapResources_v3000);
 WP_HIP_PFN(hipGraphicsUnregisterResource, PFN_cuGraphicsUnregisterResource_v3000);
@@ -742,7 +784,7 @@ WP_HIP_PFN(hipIpcCloseMemHandle, PFN_cuIpcCloseMemHandle_v4010);
 WP_HIP_PFN(hipIpcGetEventHandle, PFN_cuIpcGetEventHandle_v4010);
 WP_HIP_PFN(hipIpcGetMemHandle, PFN_cuIpcGetMemHandle_v4010);
 WP_HIP_PFN(hipIpcOpenEventHandle, PFN_cuIpcOpenEventHandle_v4010);
-WP_HIP_PFN(hipIpcOpenMemHandle, PFN_cuIpcOpenMemHandle_v11000);
+WP_HIP_PFN(wp_hipIpcOpenMemHandle, PFN_cuIpcOpenMemHandle_v11000);
 // The driver API launches a hipFunction_t with flat dimensions; the runtime
 // spelling hipLaunchKernel takes a host symbol and dim3.
 WP_HIP_PFN(hipModuleLaunchKernel, PFN_cuLaunchKernel_v4000);
@@ -755,7 +797,7 @@ WP_HIP_PFN(hipMemcpyParam2DAsync, PFN_cuMemcpy2DAsync_v3020);
 WP_HIP_PFN(hipMemcpyParam2D, PFN_cuMemcpy2D_v3020);
 WP_HIP_PFN(hipDrvMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
 WP_HIP_PFN(hipDrvMemcpy3D, PFN_cuMemcpy3D_v3020);
-WP_HIP_PFN(hipMemcpyBatchAsync, PFN_cuMemcpyBatchAsync_v12080);
+WP_HIP_PFN(wp_hipMemcpyBatchAsync, PFN_cuMemcpyBatchAsync_v12080);
 // hipCtxGetDevice reports the device of the CURRENT context, so read a specific
 // context's device by making it current briefly.
 static inline hipError_t wp_hip_ctx_device(hipCtx_t ctx, int* device)
@@ -803,7 +845,7 @@ WP_HIP_PFN(wp_hipMipmappedArrayCreate, PFN_cuMipmappedArrayCreate_v5000);
 WP_HIP_PFN(hipMipmappedArrayDestroy, PFN_cuMipmappedArrayDestroy_v5000);
 WP_HIP_PFN(hipMipmappedArrayGetLevel, PFN_cuMipmappedArrayGetLevel_v5000);
 WP_HIP_PFN(hipModuleGetFunction, PFN_cuModuleGetFunction_v2000);
-WP_HIP_PFN(hipModuleGetGlobal, PFN_cuModuleGetGlobal_v3020);
+WP_HIP_PFN(wp_hipModuleGetGlobal, PFN_cuModuleGetGlobal_v3020);
 // hipModuleLoadDataEx is fine once CUjit_option aliases hipJitOption; the
 // wrapper exists only to keep the driver-API parameter spelling.
 static inline hipError_t wp_hipModuleLoadDataEx(
@@ -861,7 +903,7 @@ WP_HIP_PFN(hipStreamQuery, PFN_cuStreamQuery_v2000);
 WP_HIP_PFN(hipStreamSynchronize, PFN_cuStreamSynchronize_v2000);
 WP_HIP_PFN(hipStreamUpdateCaptureDependencies, PFN_cuStreamUpdateCaptureDependencies_v11030);
 WP_HIP_PFN(hipStreamWaitEvent, PFN_cuStreamWaitEvent_v3020);
-WP_HIP_PFN(hipTexObjectCreate, PFN_cuTexObjectCreate_v5000);
+WP_HIP_PFN(wp_hipTexObjectCreate, PFN_cuTexObjectCreate_v5000);
 WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 
 // Graph memory-node inspection: the enumerators and accessors Warp uses to walk
