@@ -3,9 +3,15 @@
 
 // HIP compatibility shim: satisfies `#include <cub/cub.cuh>` on ROCm.
 //
-// hipCUB mirrors CUB's device-wide primitives on top of rocPRIM, and
-// hip_util.h aliases the cub namespace onto hipcub.
+// Warp uses CUB's device-wide primitives (radix sort, scan, reduce, select,
+// run-length encode). ROCm ships hipCUB, which mirrors that API on top of
+// rocPRIM, so the sources compile unchanged once cub:: resolves to hipcub::.
+//
+// The include lives here rather than in hip_util.h so that it is pulled in only
+// by the translation units that actually use CUB, and always at file scope.
 
 #pragma once
 
-#include "../hip_util.h"
+#include <hipcub/hipcub.hpp>
+
+namespace cub = hipcub;

@@ -934,13 +934,3 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 #ifndef CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
 #define CU_RESOURCE_TYPE_MIPMAPPED_ARRAY HIP_RESOURCE_TYPE_MIPMAPPED_ARRAY
 #endif  // CU_RESOURCE_TYPE_MIPMAPPED_ARRAY
-
-// ---------------------------------------------------------------------------
-// CUB -> hipCUB.
-//
-// Warp uses CUB's device-wide primitives (radix sort, scan, reduce, select,
-// run-length encode). ROCm ships hipCUB, which mirrors the same API on top of
-// rocPRIM, so the sources compile unchanged once cub:: resolves to hipcub::.
-// ---------------------------------------------------------------------------
-#include <hipcub/hipcub.hpp>
-namespace cub = hipcub;
