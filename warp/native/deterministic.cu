@@ -20,6 +20,11 @@
 #include <cub/cub.cuh>
 #include <thrust/iterator/transform_iterator.h>
 
+// rocPRIM advances and subscripts iterators with unsigned indices, which
+// rocThrust's transform_iterator does not accept. This supplies an iterator
+// that does; on CUDA it is thrust::make_transform_iterator unchanged.
+#include "hip_compat/thrust_iterator_compat.h"
+
 namespace {
 
 // Extract the destination index (upper 32 bits) from a sort key.
@@ -565,7 +570,7 @@ void query_raw_scalar_temp_sizes(
         )
     );
 
-    auto dest_keys = thrust::make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
+    auto dest_keys = wp::wp_make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
     ReduceByKeyOp<T> reduce_op { op };
     check_cuda(
         cub::DeviceReduce::ReduceByKey(
@@ -590,8 +595,8 @@ void query_binned_float_scalar_temp_sizes(
         )
     );
 
-    auto dest_keys = thrust::make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
-    auto accum_values = thrust::make_transform_iterator(static_cast<float*>(nullptr), FloatToBinnedAccumulator {});
+    auto dest_keys = wp::wp_make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
+    auto accum_values = wp::wp_make_transform_iterator(static_cast<float*>(nullptr), FloatToBinnedAccumulator {});
     BinnedAccumulatorAddOp reduce_op {};
     check_cuda(
         cub::DeviceReduce::ReduceByKey(
@@ -659,9 +664,9 @@ void query_binned_component_temp_sizes(int count, cudaStream_t stream, size_t& s
     query_generic_sort_temp_size(count, stream, sort_temp_size);
 
     reduce_temp_size = 0;
-    auto dest_keys = thrust::make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
+    auto dest_keys = wp::wp_make_transform_iterator(static_cast<int64_t*>(nullptr), DestIndexTransform {});
     auto accum_values
-        = thrust::make_transform_iterator(static_cast<int*>(nullptr), ComponentToBinnedAccumulator { nullptr, 1, 0 });
+        = wp::wp_make_transform_iterator(static_cast<int*>(nullptr), ComponentToBinnedAccumulator { nullptr, 1, 0 });
     BinnedAccumulatorAddOp reduce_op {};
     check_cuda(
         cub::DeviceReduce::ReduceByKey(
@@ -910,7 +915,7 @@ void reduce_raw_scalar_run_to_run(
         )
     );
 
-    auto dest_keys = thrust::make_transform_iterator(d_keys.Current(), DestIndexTransform {});
+    auto dest_keys = wp::wp_make_transform_iterator(d_keys.Current(), DestIndexTransform {});
 
     ReduceByKeyOp<T> reduce_op { op };
     check_cuda(
@@ -968,8 +973,8 @@ void reduce_binned_float_scalar_run_to_run(
         )
     );
 
-    auto dest_keys = thrust::make_transform_iterator(d_keys.Current(), DestIndexTransform {});
-    auto accum_values = thrust::make_transform_iterator(d_values.Current(), FloatToBinnedAccumulator {});
+    auto dest_keys = wp::wp_make_transform_iterator(d_keys.Current(), DestIndexTransform {});
+    auto accum_values = wp::wp_make_transform_iterator(d_values.Current(), FloatToBinnedAccumulator {});
 
     BinnedAccumulatorAddOp reduce_op {};
     check_cuda(
@@ -1043,13 +1048,13 @@ void reduce_binned_float_components_run_to_run(
         )
     );
 
-    auto dest_keys = thrust::make_transform_iterator(d_keys.Current(), DestIndexTransform {});
+    auto dest_keys = wp::wp_make_transform_iterator(d_keys.Current(), DestIndexTransform {});
     BinnedAccumulatorAddOp reduce_op {};
 
     // CUB ReduceByKey accepts one value stream, so flatten composite values by
     // reducing each component stream separately.
     for (int component = 0; component < components; ++component) {
-        auto accum_values = thrust::make_transform_iterator(
+        auto accum_values = wp::wp_make_transform_iterator(
             d_indices.Current(), ComponentToBinnedAccumulator { values, components, component }
         );
         check_cuda(

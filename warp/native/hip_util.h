@@ -954,9 +954,3 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 #define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
 #endif  // cudaStreamCaptureModeGlobal
 
-// rocPRIM offsets iterators with unsigned indices; rocThrust's
-// transform_iterator only declares the signed overload. See the header for
-// detail. Guarded so host translation units without Thrust are unaffected.
-#if defined(__HIPCC__) && __has_include(<thrust/iterator/transform_iterator.h>)
-#include "hip_compat/thrust_iterator_compat.h"
-#endif

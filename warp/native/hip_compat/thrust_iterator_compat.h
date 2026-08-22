@@ -1,18 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// rocPRIM offsets iterators with an unsigned index:
+// rocPRIM advances and subscripts iterators with an unsigned index:
 //
 //   const KeyIterator block_keys = keys_input + block_offset;   // const unsigned int
+//   value = block_keys[unsigned_index];
 //
-// rocThrust's transform_iterator declares operator+ only for its signed
-// difference_type, so an unsigned operand is ambiguous and
-// rocprim::reduce_by_key fails to compile. CUB with CUDA Thrust accepts both.
+// rocThrust's transform_iterator declares operator+ and operator[] only for its
+// signed difference_type, so both are ambiguous with an unsigned operand and
+// rocprim::reduce_by_key fails to compile. CUB with CUDA Thrust accepts either.
 //
-// Adding the unsigned overload keeps warp/native/deterministic.cu unchanged.
-// It lives in namespace thrust so argument-dependent lookup finds it from
-// rocPRIM's call site, and is constrained to Thrust's transform_iterator so no
-// other type is affected.
+// wp_make_transform_iterator returns an iterator that also accepts unsigned
+// offsets. On CUDA it is exactly thrust::make_transform_iterator.
 
 #pragma once
 
@@ -20,15 +19,58 @@
 
 #include <type_traits>
 
-namespace thrust {
+namespace wp {
 
-template <typename F, typename I, typename U,
-          typename = std::enable_if_t<std::is_unsigned_v<std::remove_cv_t<U>>>>
-__host__ __device__ inline transform_iterator<F, I> operator+(
-    const transform_iterator<F, I>& it, U n)
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+
+template <typename Iterator>
+struct unsigned_offsetable_iterator : Iterator {
+    using difference_type = typename Iterator::difference_type;
+    using reference = typename Iterator::reference;
+
+    unsigned_offsetable_iterator() = default;
+
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    __host__ __device__ unsigned_offsetable_iterator(const Iterator& base) : Iterator(base) {}
+
+    __host__ __device__ unsigned_offsetable_iterator operator+(difference_type n) const
+    {
+        return unsigned_offsetable_iterator(static_cast<const Iterator&>(*this) + n);
+    }
+
+    template <typename U, typename = std::enable_if_t<std::is_unsigned_v<std::remove_cv_t<U>>>>
+    __host__ __device__ unsigned_offsetable_iterator operator+(U n) const
+    {
+        return *this + static_cast<difference_type>(n);
+    }
+
+    __host__ __device__ reference operator[](difference_type n) const
+    {
+        return static_cast<const Iterator&>(*this)[n];
+    }
+
+    template <typename U, typename = std::enable_if_t<std::is_unsigned_v<std::remove_cv_t<U>>>>
+    __host__ __device__ reference operator[](U n) const
+    {
+        return (*this)[static_cast<difference_type>(n)];
+    }
+};
+
+template <typename Function, typename Iterator>
+__host__ __device__ auto wp_make_transform_iterator(Iterator it, Function fun)
 {
-    using diff_t = typename transform_iterator<F, I>::difference_type;
-    return it + static_cast<diff_t>(n);
+    return unsigned_offsetable_iterator<thrust::transform_iterator<Function, Iterator>>(
+        thrust::make_transform_iterator(it, fun));
 }
 
-}  // namespace thrust
+#else  // CUDA
+
+template <typename Function, typename Iterator>
+__host__ __device__ auto wp_make_transform_iterator(Iterator it, Function fun)
+{
+    return thrust::make_transform_iterator(it, fun);
+}
+
+#endif  // WP_ENABLE_HIP
+
+}  // namespace wp
