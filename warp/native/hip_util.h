@@ -635,31 +635,42 @@ WP_HIP_PFN(hipEventRecordWithFlags, PFN_cuEventRecordWithFlags_v11010);
 WP_HIP_PFN(hipEventRecord, PFN_cuEventRecord_v2000);
 WP_HIP_PFN(hipEventSynchronize, PFN_cuEventSynchronize_v2000);
 WP_HIP_PFN(hipFuncGetAttribute, PFN_cuFuncGetAttribute_v2020);
-WP_HIP_PFN(hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
+// Setting uses hipFuncAttribute; querying uses hipFunction_attribute, which
+// CUfunction_attribute aliases. Convert at the boundary.
+static inline hipError_t wp_hipFuncSetAttribute(
+    hipFunction_t f, hipFunction_attribute attrib, int value)
+{
+    return hipFuncSetAttribute(
+        reinterpret_cast<const void*>(f), static_cast<hipFuncAttribute>(attrib), value);
+}
+WP_HIP_PFN(wp_hipFuncSetAttribute, PFN_cuFuncSetAttribute_v9000);
 // The driver API returns the message through an out-parameter, while the HIP
 // runtime spellings return it directly. ROCm provides the driver-style forms
 // under hipDrv*.
 // hipDrv* are marked nodiscard, but the driver API's callers legitimately
 // ignore the status and just check whether the out-parameter was filled.
 // Wrap them so the discarded result is explicit and local.
-static inline void wp_hipDrvGetErrorName(hipError_t e, const char** s)
+static inline int wp_hipDrvGetErrorName(hipError_t e, const char** s)
 {
-    if (hipDrvGetErrorName(e, s) != hipSuccess && s)
+    hipError_t status = hipDrvGetErrorName(e, s);
+    if (status != hipSuccess && s)
         *s = nullptr;
+    return static_cast<int>(status);
 }
-static inline void wp_hipDrvGetErrorString(hipError_t e, const char** s)
+static inline int wp_hipDrvGetErrorString(hipError_t e, const char** s)
 {
-    if (hipDrvGetErrorString(e, s) != hipSuccess && s)
+    hipError_t status = hipDrvGetErrorString(e, s);
+    if (status != hipSuccess && s)
         *s = nullptr;
+    return static_cast<int>(status);
 }
-// ROCm marks the whole hipError_t enum [[nodiscard]], and Warp builds with
-// -Werror, so a caller that legitimately ignores the status (it tests the
-// out-parameter instead) would not compile. These two entry points are the
-// only such callers, so give them a void-returning type: the status is
-// consumed inside the wrapper, and the out-parameter stays NULL on failure,
-// which is exactly what the caller checks.
-using PFN_cuGetErrorName_v6000 = void (*)(hipError_t, const char**);
-using PFN_cuGetErrorString_v6000 = void (*)(hipError_t, const char**);
+// ROCm marks the whole hipError_t enum [[nodiscard]] on C++17, with no opt-out
+// macro. Warp returns these statuses from cuGetErrorName_f/cuGetErrorString_f
+// but also calls them for effect in check_cu_result. Returning the underlying
+// integer type keeps both uses well-formed: it converts to CUresult where a
+// status is wanted, and carries no nodiscard where it is not.
+using PFN_cuGetErrorName_v6000 = int (*)(hipError_t, const char**);
+using PFN_cuGetErrorString_v6000 = int (*)(hipError_t, const char**);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
 // The driver API passes per-edge data and puts the dependency count after
 // it; HIP has no edge-data parameter. Drop it: Warp only uses default
