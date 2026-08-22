@@ -588,7 +588,15 @@ using CUDA_RESOURCE_VIEW_DESC = hipResourceViewDesc;
 // decltype keeps the signature in step with ROCm automatically: if HIP changes
 // one, this stops compiling rather than silently mismatching.
 // ---------------------------------------------------------------------------
+// Several HIP entry points that Warp resolves dynamically are marked
+// deprecated (the context API, the profiler controls). Warp builds with
+// -Werror, so suppress the diagnostic around these declarations: taking a
+// function's address to type a driver entry point is not a use of it.
+#if defined(__GNUC__) || defined(__clang__)
+#define WP_HIP_PFN(_fn, _pfn)                                        _Pragma("GCC diagnostic push")                                   _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")     using _pfn = decltype(&_fn);                                     _Pragma("GCC diagnostic pop")
+#else
 #define WP_HIP_PFN(_fn, _pfn) using _pfn = decltype(&_fn)
+#endif
 
 WP_HIP_PFN(hipArray3DCreate, PFN_cuArray3DCreate_v3020);
 WP_HIP_PFN(hipArray3DGetDescriptor, PFN_cuArray3DGetDescriptor_v3020);
@@ -658,7 +666,10 @@ WP_HIP_PFN(hipModuleUnload, PFN_cuModuleUnload_v2000);
 // OccupancyMaxActiveClusters has no ROCm equivalent; the entry point resolves to
 // null at runtime and callers already handle a missing driver entry.
 using PFN_cuOccupancyMaxActiveClusters_v11070 = hipError_t (*)(int*, hipFunction_t, const hipLaunchConfig_t*);
-WP_HIP_PFN(hipOccupancyMaxPotentialBlockSize, PFN_cuOccupancyMaxPotentialBlockSize_v6050);
+// Overloaded in the HIP headers, so decltype(&f) is ambiguous; state the
+// C signature that the driver entry point actually has.
+using PFN_cuOccupancyMaxPotentialBlockSize_v6050 =
+    hipError_t (*)(int*, int*, hipFunction_t, size_t, int);
 WP_HIP_PFN(hipPointerGetAttribute, PFN_cuPointerGetAttribute_v4000);
 WP_HIP_PFN(hipProfilerStart, PFN_cuProfilerStart_v4000);
 WP_HIP_PFN(hipProfilerStop, PFN_cuProfilerStop_v4000);
