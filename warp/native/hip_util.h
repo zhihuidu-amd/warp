@@ -474,6 +474,7 @@ using CUgraphicsResource = hipGraphicsResource_t;
 using CUarray = hipArray_t;
 using CUtexObject = wp_hip_handle<hipTextureObject_t>;
 using CUgraph = hipGraph_t;
+using CUgraphExec = hipGraphExec_t;
 using CUgraphNode = hipGraphNode_t;
 using CUgraphNodeType = hipGraphNodeType;
 using CUgraphNodeParams = hipGraphNodeParams;
