@@ -140,6 +140,28 @@ excluded from HIP builds and the feature reports as unavailable, as it already
 does on the CPU. This looks like a rocThrust issue worth reporting upstream to
 AMD rather than something to work around in Warp.
 
+**Warp size is 32 on CUDA and 64 on AMD.** This is the one difference that is not
+a naming or API question, and it reaches into algorithm code.
+`warp/native/tile_reduce.h` hardcodes `#define WP_TILE_WARP_SIZE 32`, and the
+warp-level primitives assume a lane mask fits in 32 bits, e.g. in `sparse.cu`:
+
+```c
+constexpr unsigned int full_warp_mask = 0xffffffffu;
+const unsigned int keep_mask = __ballot_sync(full_warp_mask, run_start);
+```
+
+On ROCm a wavefront is 64 lanes, so `__ballot_sync` returns a 64-bit mask and HIP
+rejects a 32-bit one outright:
+
+    static assertion failed: The mask must be a 64-bit integer. Implicitly
+    promoting a smaller integer is almost always an error.
+
+Making this portable means WP_TILE_WARP_SIZE becoming architecture-dependent and
+the mask type widening with it, across 44 uses in four files
+(`tile_reduce.h`, `tile_scan.h`, `tile_radix_sort.h`, `sparse.cu`). Because it
+changes shared-memory sizing and lane arithmetic in tuned code, it is staged
+separately rather than folded into the enablement work.
+
 **Graph capture.** ROCm supports stream capture but not conditional graph nodes.
 Warp's conditional-node paths are therefore gated on a runtime capability query, and
 `capture_save()` is unavailable on HIP because the `.wrp` format does not encode `gfx`
@@ -151,7 +173,8 @@ The work is proposed as a sequence of independently reviewable and revertable ch
 rather than a single large one:
 
 1. **Enablement** — build system, `hip_util.h`, device init. Produces a Warp that
-   builds and runs basic kernels on `gfx942`.
+   builds and runs basic kernels on `gfx942`. The warp-size-dependent sources
+   (`sparse.cu` and the tile headers) are staged with the tile work below.
 2. **Graph capture** — stream capture, mempool interaction (builds on [GH-1702]).
 3. **Tile / MMA** — the rocWMMA-backed paths.
 4. **CI** — AMD-hosted runners.
