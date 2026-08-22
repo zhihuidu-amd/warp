@@ -432,14 +432,16 @@ using CUuuid = hipUUID;
 using CUdevice_attribute = hipDeviceAttribute_t;
 using CUipcEventHandle = hipIpcEventHandle_t;
 using CUipcMemHandle = hipIpcMemHandle_t;
-using cuuint64_t = uint64_t;
+// Must match the 'unsigned long long' out-parameters in the HIP API exactly;
+// uint64_t is a distinct type from unsigned long long on LP64.
+using cuuint64_t = unsigned long long;
 using CUgraphicsResource = hipGraphicsResource_t;
 using CUarray = hipArray_t;
 using CUtexObject = hipTextureObject_t;
 using CUgraph = hipGraph_t;
 using CUgraphNode = hipGraphNode_t;
 using CUgraphNodeType = hipGraphNodeType;
-using CUgraphNodeParams = void;
+using CUgraphNodeParams = hipGraphNodeParams;
 using CUgraphEdgeData = void;
 using CUstreamCaptureStatus = hipStreamCaptureStatus;
 using CUjit_option = hipJitOption;
@@ -694,7 +696,42 @@ WP_HIP_PFN(hipMemcpyParam2D, PFN_cuMemcpy2D_v3020);
 WP_HIP_PFN(hipDrvMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
 WP_HIP_PFN(hipDrvMemcpy3D, PFN_cuMemcpy3D_v3020);
 WP_HIP_PFN(hipMemcpyBatchAsync, PFN_cuMemcpyBatchAsync_v12080);
-WP_HIP_PFN(hipMemcpyPeerAsync, PFN_cuMemcpyPeerAsync_v4000);
+// hipCtxGetDevice reports the device of the CURRENT context, so read a specific
+// context's device by making it current briefly.
+static inline hipError_t wp_hip_ctx_device(hipCtx_t ctx, int* device)
+{
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    if (!ctx)
+        return hipGetDevice(device);
+    if (hipCtxPushCurrent(ctx) != hipSuccess)
+        return hipErrorInvalidValue;
+    hipError_t status = hipCtxGetDevice(device);
+    hipCtx_t popped = nullptr;
+    (void)hipCtxPopCurrent(&popped);
+    return status;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+}
+
+// The driver API identifies the peers by context; HIP takes device ordinals.
+// hipCtx_t carries its device, so translate rather than guard the call site.
+static inline hipError_t wp_hipMemcpyPeerAsync(
+    hipDeviceptr_t dst, hipCtx_t dstCtx, hipDeviceptr_t src, hipCtx_t srcCtx, size_t count,
+    hipStream_t stream)
+{
+    int dst_dev = 0;
+    int src_dev = 0;
+    if (wp_hip_ctx_device(dstCtx, &dst_dev) != hipSuccess)
+        return hipErrorInvalidValue;
+    if (wp_hip_ctx_device(srcCtx, &src_dev) != hipSuccess)
+        return hipErrorInvalidValue;
+    return hipMemcpyPeerAsync(dst, dst_dev, src, src_dev, count, stream);
+}
+WP_HIP_PFN(wp_hipMemcpyPeerAsync, PFN_cuMemcpyPeerAsync_v4000);
 // HIP takes a non-const descriptor here where the driver API takes const.
 // Adapt in one place rather than casting at the call site.
 static inline hipError_t wp_hipMipmappedArrayCreate(
@@ -723,8 +760,17 @@ WP_HIP_PFN(hipModuleUnload, PFN_cuModuleUnload_v2000);
 using PFN_cuOccupancyMaxActiveClusters_v11070 = hipError_t (*)(int*, hipFunction_t, const hipLaunchConfig_t*);
 // Overloaded in the HIP headers, so decltype(&f) is ambiguous; state the
 // C signature that the driver entry point actually has.
-using PFN_cuOccupancyMaxPotentialBlockSize_v6050 =
-    hipError_t (*)(int*, int*, hipFunction_t, size_t, int);
+// The driver API passes a per-block shared-memory callback; HIP takes a flat
+// size. Warp always passes a null callback, so zero is the faithful value.
+static inline hipError_t wp_hipOccupancyMaxPotentialBlockSize(
+    int* gridSize, int* blockSize, hipFunction_t f, CUoccupancyB2DSize b2dSize,
+    size_t dynSharedMemPerBlk, int blockSizeLimit)
+{
+    (void)b2dSize;
+    return hipModuleOccupancyMaxPotentialBlockSize(
+        gridSize, blockSize, f, dynSharedMemPerBlk, blockSizeLimit);
+}
+WP_HIP_PFN(wp_hipOccupancyMaxPotentialBlockSize, PFN_cuOccupancyMaxPotentialBlockSize_v6050);
 WP_HIP_PFN(hipPointerGetAttribute, PFN_cuPointerGetAttribute_v4000);
 WP_HIP_PFN(hipProfilerStart, PFN_cuProfilerStart_v4000);
 WP_HIP_PFN(hipProfilerStop, PFN_cuProfilerStop_v4000);
