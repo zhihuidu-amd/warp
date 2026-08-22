@@ -11,6 +11,7 @@
 #include "temp_buffer.h"
 
 #include <algorithm>
+#include <type_traits>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -106,6 +107,32 @@ template <typename T, int BlockSize> struct BlockIterator {
     CUDA_CALLABLE BlockIterator operator+(difference_type offset) const
     {
         return BlockIterator(ptr + offset * stride, stride);
+    }
+
+    // rocPRIM advances iterators with plain int and unsigned indices rather
+    // than difference_type, so accept any integral offset. CUB happens to use
+    // difference_type throughout, which is why this was not needed before.
+    template <typename Integral, typename = std::enable_if_t<std::is_integral<Integral>::value>>
+    CUDA_CALLABLE BlockIterator operator+(Integral offset) const
+    {
+        return *this + static_cast<difference_type>(offset);
+    }
+
+    CUDA_CALLABLE BlockIterator& operator+=(difference_type offset)
+    {
+        ptr += offset * stride;
+        return *this;
+    }
+
+    CUDA_CALLABLE BlockIterator operator-(difference_type offset) const
+    {
+        return BlockIterator(ptr - offset * stride, stride);
+    }
+
+    template <typename Integral, typename = std::enable_if_t<std::is_integral<Integral>::value>>
+    CUDA_CALLABLE reference operator[](Integral offset) const
+    {
+        return (*this)[static_cast<difference_type>(offset)];
     }
 
     CUDA_CALLABLE difference_type operator-(const BlockIterator& other) const { return (ptr - other.ptr) / stride; }
