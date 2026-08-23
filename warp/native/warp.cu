@@ -5321,7 +5321,23 @@ void* wp_cuda_load_module(void* context, const char* path)
     CUmodule module = NULL;
 
     if (load_ptx) {
+        // On HIP the question this asks -- "is the driver at least as new as
+        // the toolkit we compiled against?" -- is definitionally yes: one ROCm
+        // installation supplies both. The literal comparison cannot be used
+        // because the two sides are deliberately on different scales. The
+        // driver is reported in CUDA's major*1000+minor*10 form so the Python
+        // runtime can decode it, while CUDA_VERSION stays in HIP's wide form
+        // for the compile-time feature gates (see native/hip_util.h).
+        //
+        // Getting this wrong is not a compile error. It silently selects the
+        // else branch, which calls nvPTXCompiler to assemble PTX -- an
+        // NVIDIA-only component, with no PTX to assemble in the first place,
+        // since hiprtc emits a ready-to-load code object.
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+        if (check_cu(cuDriverGetVersion_f(&driver_cuda_version))) {
+#else
         if (check_cu(cuDriverGetVersion_f(&driver_cuda_version)) && driver_cuda_version >= CUDA_VERSION) {
+#endif
             // let the driver compile the PTX
 
             CUjit_option options[2];
