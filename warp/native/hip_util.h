@@ -477,7 +477,25 @@ using CUgraph = hipGraph_t;
 using CUgraphExec = hipGraphExec_t;
 using CUgraphNode = hipGraphNode_t;
 using CUgraphNodeType = hipGraphNodeType;
-using CUgraphNodeParams = hipGraphNodeParams;
+// hipGraphNodeParams has no `conditional` member because ROCm has no
+// conditional node type. Wrap it so the conditional-node code in warp.cu still
+// compiles; that code is unreachable on HIP (see the conditional graph node
+// note below), and cuGraphAddNode_f is given the HIP-native part.
+using cudaGraphConditionalHandle = unsigned long long;
+
+struct wp_hip_conditional_node_params {
+    cudaGraphConditionalHandle handle;
+    int type;
+    unsigned int size;
+    hipCtx_t ctx;
+    hipGraph_t phGraph_out[2];
+};
+
+struct wp_hip_graph_node_params : hipGraphNodeParams {
+    wp_hip_conditional_node_params conditional;
+};
+
+using CUgraphNodeParams = wp_hip_graph_node_params;
 using CUgraphEdgeData = void;
 using CUstreamCaptureStatus = hipStreamCaptureStatus;
 using CUjit_option = hipJitOption;
@@ -1018,8 +1036,6 @@ WP_HIP_PFN(hipTexObjectDestroy, PFN_cuTexObjectDestroy_v5000);
 // declarations exist only so the file compiles; the handle constructor reports
 // failure, so a path reached in error fails loudly rather than silently
 // building a graph with no condition.
-using cudaGraphConditionalHandle = unsigned long long;
-
 static inline hipError_t cudaGraphConditionalHandleCreate(cudaGraphConditionalHandle* handle, hipGraph_t graph,
                                                           unsigned int default_value = 0,
                                                           unsigned int flags = 0)
