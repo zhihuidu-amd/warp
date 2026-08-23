@@ -8,6 +8,11 @@
 #include <hip/hip_runtime_api.h>
 #include <hip/hiprtc.h>
 
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
 #include "hip_compat/hip_device_compat.h"
 
 #ifndef HIP_VERSION
@@ -71,8 +76,76 @@
 #ifndef nvrtcCreateProgram
 #define nvrtcCreateProgram hiprtcCreateProgram
 #endif  // nvrtcCreateProgram
+// GPU architecture is an INTEGER in Warp and a STRING on ROCm, and the two do
+// not round-trip. Warp stores arch as 10*major + minor and formats
+//     --gpu-architecture=sm_%d      (or compute_%d for PTX)
+// On gfx942, hipDeviceAttributeComputeCapabilityMajor/Minor report 9 and 4, so
+// arch becomes 94 and the trailing "2" is simply gone -- no integer encoding
+// recovers "gfx942" from it, and hiprtc rejects "sm_94" ("CUDA kernel build
+// failed with error code 6").
+//
+// Rather than change Warp's integer plumbing, rewrite the option where it
+// reaches hiprtc and take the architecture from the device itself, which is
+// authoritative and needs no reconstruction. The snprintf format strings are
+// literals a macro cannot touch, but nvrtcCompileProgram is already an alias
+// here, so the substitution happens on the option array instead.
+static inline const char* wp_hip_arch_string()
+{
+    // Cached: hipGetDeviceProperties is not cheap and this runs per JIT.
+    // Sized to hipDeviceProp_t::gcnArchName (256 bytes) -- anything smaller is
+    // a -Werror=format-truncation failure, since Warp builds with -Werror.
+    static char cached[256] = {0};
+    if (cached[0])
+        return cached;
+
+    int ordinal = 0;
+    if (hipGetDevice(&ordinal) != hipSuccess)
+        ordinal = 0;
+
+    hipDeviceProp_t props{};
+    if (hipGetDeviceProperties(&props, ordinal) != hipSuccess)
+        return "gfx942";  // last resort; hiprtc still reports its own error
+
+    // gcnArchName carries target features, e.g. "gfx942:sramecc+:xnack-".
+    // hiprtc accepts the full string and the features affect codegen, so keep
+    // them rather than truncating at the colon.
+    snprintf(cached, sizeof(cached), "%s", props.gcnArchName);
+    return cached;
+}
+
+static inline hiprtcResult wp_hiprtcCompileProgram(
+    hiprtcProgram prog, int numOptions, const char** options)
+{
+    // Replace any NVIDIA arch option with the AMD offload target. Everything
+    // else Warp passes (--include-path, --std=c++17, ...) hiprtc understands
+    // as-is and is forwarded untouched.
+    std::vector<const char*> rewritten;
+    std::string offload = std::string("--offload-arch=") + wp_hip_arch_string();
+    bool have_arch = false;
+
+    if (numOptions > 0)
+        rewritten.reserve(size_t(numOptions));
+    for (int i = 0; i < numOptions; ++i) {
+        const char* o = options ? options[i] : nullptr;
+        if (!o)
+            continue;
+        if (strncmp(o, "--gpu-architecture=", 19) == 0 || strncmp(o, "-arch=", 6) == 0) {
+            if (!have_arch) {
+                rewritten.push_back(offload.c_str());
+                have_arch = true;
+            }
+            continue;  // drop the sm_/compute_ form entirely
+        }
+        rewritten.push_back(o);
+    }
+    if (!have_arch)
+        rewritten.push_back(offload.c_str());
+
+    return hiprtcCompileProgram(prog, int(rewritten.size()), rewritten.data());
+}
+
 #ifndef nvrtcCompileProgram
-#define nvrtcCompileProgram hiprtcCompileProgram
+#define nvrtcCompileProgram wp_hiprtcCompileProgram
 #endif  // nvrtcCompileProgram
 #ifndef nvrtcDestroyProgram
 #define nvrtcDestroyProgram hiprtcDestroyProgram
