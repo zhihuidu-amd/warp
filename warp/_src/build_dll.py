@@ -1008,6 +1008,11 @@ def build_dll_for_arch(
                         cudacc_flag = "" if uses_thrust else " -D__CUDACC__"
                         cuda_cmd = f'{hipcc_cmd} {" ".join(hipcc_opts)}{cudacc_flag} {opt_flag} -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -D_GLIBCXX_USE_CXX11_ABI=0 -DWP_ENABLE_CUDA=1 -DWP_ENABLE_HIP=1 -I"{native_dir}/hip_compat" -I"{native_dir}" -isystem "{rocm_home}/include" -D{mathdx_enabled} -o "{cu_out}" -c "{cu_path}"'
                         cuda_cmds.append(cuda_cmd)
+                        # Must be added here too: the `continue` below skips the
+                        # shared ld_inputs.append at the end of this loop body,
+                        # so without this every HIP object is compiled and then
+                        # silently dropped from the link.
+                        ld_inputs.append(quote(cu_out))
                         continue
 
                     _nvcc_opts = [
@@ -1065,6 +1070,19 @@ def build_dll_for_arch(
                         raise e
                 elapsed = (time.perf_counter_ns() - wall_clock) / 1000000.0
                 print(f"build took {elapsed:.2f} ms ({args.jobs:d} workers)")
+
+        # Every device source that was compiled must reach the linker. A HIP
+        # build once compiled all 13 .cu files successfully and linked none of
+        # them, because the HIP branch above returned early past the shared
+        # ld_inputs.append. The result still produced a warp.so, so the failure
+        # only surfaced as ~50 undefined symbols with no obvious cause.
+        if cu_paths:
+            missing = [p for p in cu_paths if quote(p + _obj_tag + ".o") not in ld_inputs]
+            if missing:
+                raise RuntimeError(
+                    "Device objects were compiled but not passed to the linker: "
+                    + ", ".join(os.path.basename(p) for p in missing)
+                )
 
         opt_exported_symbols = ""
 
