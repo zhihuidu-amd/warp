@@ -17,8 +17,27 @@
 #define HIP_VERSION 0
 #endif  // defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR) && defined(HIP_VERSION_PATCH)
 #endif  // HIP_VERSION
+// CUDA_VERSION must follow CUDA's scheme (major*1000 + minor*10), NOT HIP's
+// (major*10000000 + minor*100000 + patch). Warp decodes it as a CUDA toolkit
+// version and derives min_driver_version from it:
+//
+//     toolkit_version = (v // 1000, (v % 1000) // 10)
+//
+// Aliasing it straight to HIP_VERSION (70125424 on ROCm 7.1) yields a "toolkit"
+// of (70125, 42), so min_driver_version becomes (70125, 0) while the driver
+// reports about (6, 4). Warp then gates device enumeration on
+//
+//     if driver_version >= min_driver_version:
+//
+// which is false, so it registers NO GPU and silently reports a CPU-only device
+// list -- the library builds, links and imports perfectly and simply never sees
+// the GPU. Re-encode into CUDA's scheme so the comparison is meaningful.
 #ifndef CUDA_VERSION
-#define CUDA_VERSION HIP_VERSION
+#if defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR)
+#define CUDA_VERSION ((HIP_VERSION_MAJOR) * 1000 + (HIP_VERSION_MINOR) * 10)
+#else
+#define CUDA_VERSION 0
+#endif
 #endif  // CUDA_VERSION
 #ifndef NVRTC_SUCCESS
 #define NVRTC_SUCCESS HIPRTC_SUCCESS
@@ -906,7 +925,27 @@ WP_HIP_PFN(hipDeviceGetUuid, PFN_cuDeviceGetUuid_v11040);
 WP_HIP_PFN(hipDeviceGet, PFN_cuDeviceGet_v2000);
 WP_HIP_PFN(hipDevicePrimaryCtxRelease, PFN_cuDevicePrimaryCtxRelease_v11000);
 WP_HIP_PFN(hipDevicePrimaryCtxRetain, PFN_cuDevicePrimaryCtxRetain_v7000);
-WP_HIP_PFN(hipDriverGetVersion, PFN_cuDriverGetVersion_v2020);
+// Re-encode into CUDA's major*1000 + minor*10 scheme, matching CUDA_VERSION
+// above. ROCm documents that "there is no mapping/correlation between HIP
+// driver version and CUDA driver version", and hipDriverGetVersion returns
+// HIP's wide encoding. Warp compares this against min_driver_version, which it
+// derives from CUDA_VERSION, so both sides must use the same scheme or device
+// enumeration is skipped and no GPU is ever registered.
+static inline hipError_t wp_hipDriverGetVersion(int* driverVersion)
+{
+    if (!driverVersion)
+        return hipErrorInvalidValue;
+    int raw = 0;
+    hipError_t status = hipDriverGetVersion(&raw);
+    if (status != hipSuccess)
+        return status;
+    // HIP: major*10000000 + minor*100000 + patch  ->  CUDA: major*1000 + minor*10
+    const int major = raw / 10000000;
+    const int minor = (raw / 100000) % 100;
+    *driverVersion = major * 1000 + minor * 10;
+    return status;
+}
+WP_HIP_PFN(wp_hipDriverGetVersion, PFN_cuDriverGetVersion_v2020);
 // The driver API always takes flags; the plain HIP spelling does not.
 WP_HIP_PFN(hipEventCreateWithFlags, PFN_cuEventCreate_v2000);
 WP_HIP_PFN(hipEventDestroy, PFN_cuEventDestroy_v4000);
