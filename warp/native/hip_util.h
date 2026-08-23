@@ -134,7 +134,25 @@ static inline hiprtcResult wp_hiprtcCompileProgram(
     std::vector<std::string> translated;
     bool have_arch = false;
 
-    translated.reserve(size_t(numOptions > 0 ? numOptions : 0) + 1);
+    translated.reserve(size_t(numOptions > 0 ? numOptions : 0) + 2);
+
+    // Warp's device headers gate several runtime-compilation behaviours on
+    // __CUDACC_RTC__, which NVRTC defines and hiprtc does not (it defines
+    // __HIPCC_RTC__ instead). Measured on gfx942/ROCm 7.2:
+    //
+    //   __CUDACC_RTC__  NOT defined      __HIPCC_RTC__   DEFINED
+    //   __CUDA__        NOT defined      __clang__       DEFINED
+    //
+    // so tile.h's `#if WP_ENABLE_CUDA || defined(__CUDACC_RTC__) ||
+    // (defined(__clang__) && defined(__CUDA__))` is false under hiprtc and its
+    // outer #else hand-defines `struct float4`, colliding with HIP's built-in:
+    //   tile.h:33:20: error: definition of type 'float4' conflicts with type alias
+    //
+    // Defining it is correct rather than expedient -- every behaviour it gates
+    // holds for hiprtc as well: float4 is built in (verified by compiling
+    // `__device__ float4 x;` with no includes), the target is 64-bit, and
+    // volume.h defines the same macro itself to stop PNanoVDB pulling <stdint.h>.
+    translated.push_back("-D__CUDACC_RTC__");
     for (int i = 0; i < numOptions; ++i) {
         const char* o = options ? options[i] : nullptr;
         if (!o)
