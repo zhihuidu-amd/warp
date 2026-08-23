@@ -17,28 +17,51 @@
 #define HIP_VERSION 0
 #endif  // defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR) && defined(HIP_VERSION_PATCH)
 #endif  // HIP_VERSION
-// CUDA_VERSION must follow CUDA's scheme (major*1000 + minor*10), NOT HIP's
-// (major*10000000 + minor*100000 + patch). Warp decodes it as a CUDA toolkit
-// version and derives min_driver_version from it:
+// CUDA_VERSION serves two DIFFERENT purposes in Warp, and they need different
+// values on ROCm.
 //
-//     toolkit_version = (v // 1000, (v % 1000) // 10)
+// 1. Compile-time feature gates: ~25 sites of the form
+//        #if CUDA_VERSION >= 12080
+//    selecting which CUDA driver APIs exist, plus a hard
+//        #if CUDA_VERSION < 12000
+//        #error Building Warp requires CUDA Toolkit version 12.0 or higher
+//    in cuda_util.cpp. HIP provides the modern spellings, so these gates must
+//    all be taken. CUDA_VERSION therefore has to compare HIGH.
 //
-// Aliasing it straight to HIP_VERSION (70125424 on ROCm 7.1) yields a "toolkit"
-// of (70125, 42), so min_driver_version becomes (70125, 0) while the driver
-// reports about (6, 4). Warp then gates device enumeration on
+// 2. wp_cuda_toolkit_version() in warp.cu returns CUDA_VERSION to Python, which
+//    decodes it as (v // 1000, (v % 1000) // 10) and derives
+//    min_driver_version from it, then gates device enumeration on
+//        driver_version >= min_driver_version
+//    That needs a value in CUDA's own major*1000 + minor*10 scheme.
 //
-//     if driver_version >= min_driver_version:
+// Aliasing CUDA_VERSION to HIP_VERSION (70125424 on ROCm 7.1) satisfies (1) --
+// every gate passes -- but gives (2) a "toolkit" of (70125, 42), so the minimum
+// driver became (70125, 0) against a driver reporting about (6, 4). The gate was
+// never satisfied, no GPU was registered, and Warp silently reported a CPU-only
+// device list after building, linking and importing without a single warning.
 //
-// which is false, so it registers NO GPU and silently reports a CPU-only device
-// list -- the library builds, links and imports perfectly and simply never sees
-// the GPU. Re-encode into CUDA's scheme so the comparison is meaningful.
+// Setting CUDA_VERSION to a CUDA-scheme value instead (7020) breaks (1): it is
+// below the 12000 minimum, so cuda_util.cpp fails with the #error above and the
+// feature gates deselect the APIs HIP actually provides.
+//
+// So: keep CUDA_VERSION high for the feature gates, and report the version
+// separately through WP_HIP_TOOLKIT_VERSION, which wp_cuda_toolkit_version()
+// returns instead (see warp.cu). The two concerns are genuinely distinct and
+// cannot share one macro.
 #ifndef CUDA_VERSION
-#if defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR)
-#define CUDA_VERSION ((HIP_VERSION_MAJOR) * 1000 + (HIP_VERSION_MINOR) * 10)
-#else
-#define CUDA_VERSION 0
-#endif
+#define CUDA_VERSION HIP_VERSION
 #endif  // CUDA_VERSION
+
+// The ROCm version in CUDA's major*1000 + minor*10 encoding, for the Python
+// runtime's version comparison only -- never for a feature gate.
+#if defined(HIP_VERSION_MAJOR) && defined(HIP_VERSION_MINOR)
+#define WP_HIP_TOOLKIT_VERSION ((HIP_VERSION_MAJOR) * 1000 + (HIP_VERSION_MINOR) * 10)
+#else
+#define WP_HIP_TOOLKIT_VERSION 0
+#endif
+
+// warp.cu returns CUDA_VERSION from wp_cuda_toolkit_version(); on HIP it
+// returns WP_HIP_TOOLKIT_VERSION instead, under a one-line guard there.
 #ifndef NVRTC_SUCCESS
 #define NVRTC_SUCCESS HIPRTC_SUCCESS
 #endif  // NVRTC_SUCCESS

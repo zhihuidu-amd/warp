@@ -2442,7 +2442,15 @@ int wp_cuda_driver_version()
         return 0;
 }
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+// CUDA_VERSION is HIP_VERSION here, which uses a different encoding
+// (major*10000000 + ...) than the major*1000 + minor*10 the Python runtime
+// decodes. It has to stay that way for the CUDA_VERSION feature gates, so
+// report the ROCm version in CUDA's scheme instead. See native/hip_util.h.
+int wp_cuda_toolkit_version() { return WP_HIP_TOOLKIT_VERSION; }
+#else
 int wp_cuda_toolkit_version() { return CUDA_VERSION; }
+#endif
 
 int wp_nvrtc_version()
 {
