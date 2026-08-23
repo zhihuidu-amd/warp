@@ -232,9 +232,27 @@ typedef unsigned long long uint64_t;
 
 #if defined(__CUDACC__)
 
-#if defined(__clang__)
+#if defined(__clang__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
 // When compiling CUDA with barebones Clang we need to define its builtins and runtime functions ourselves.
+//
+// Excluded for HIP: hipcc and hiprtc are Clang, but they already provide these
+// builtins, so including this header redefines size_t with a different type and
+// declares NVVM PTX intrinsics (__nvvm_read_ptx_sreg_tid_x and friends) that do
+// not exist on AMD.
 #include "cuda_crt.h"
+#elif defined(__HIPCC_RTC__)
+// hiprtc provides the runtime and the builtins, but not <cstring>. The only
+// call that needs it is memset in radix_sort_pairs_cpu_core (tile_radix_sort.h),
+// a CPU-only helper with no CUDA_CALLABLE that the JIT nonetheless parses
+// because builtin.h includes that header unconditionally. NVIDIA does not hit
+// this because cuda_crt.h above declares a __device__ memset. Declare just that
+// one symbol rather than reintroducing the whole CUDA shim.
+// __host__ only. hiprtc already declares a __device__ memset, so __device__ or
+// __host__ __device__ here is a redeclaration conflict ("cannot overload
+// __device__ function 'memset'"). In CUDA/HIP, __host__ and __device__ form
+// distinct overload sets, so a host-only declaration coexists with hiprtc's and
+// is what the host-context call site resolves to.
+extern "C" __host__ void* memset(void* dest, int value, size_t count);
 #endif
 
 #else

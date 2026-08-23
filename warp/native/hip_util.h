@@ -153,6 +153,57 @@ static inline hiprtcResult wp_hiprtcCompileProgram(
     // `__device__ float4 x;` with no includes), the target is 64-bit, and
     // volume.h defines the same macro itself to stop PNanoVDB pulling <stdint.h>.
     translated.push_back("-D__CUDACC_RTC__");
+
+    // __CUDACC__ is the macro that makes Warp's builtins DEVICE functions:
+    //
+    //     #if !defined(__CUDACC__)
+    //     #define CUDA_CALLABLE            // host-only
+    //     #else
+    //     #define CUDA_CALLABLE __host__ __device__
+    //
+    // hiprtc defines neither __CUDACC__ nor __CUDACC_RTC__, so without this
+    // every wp::tid/address/load/add compiled as a host function and the
+    // generated kernel failed with
+    //     error: reference to __host__ function 'init' in __global__ function
+    //     error: no matching function for call to 'tid'
+    // and a dozen more -- errors that read like the generated code is wrong
+    // when the real cause is that the whole builtin library lost its
+    // __device__ annotations.
+    //
+    // The AOT path already passes -D__CUDACC__ per source in build_dll.py;
+    // this is the JIT equivalent. rocThrust also keys on __CUDACC__, but no
+    // Thrust code reaches hiprtc -- deterministic.cu is AOT-only and excluded
+    // from HIP builds entirely.
+    translated.push_back("-D__CUDACC__");
+
+    // With __CUDACC__ defined, crt.h would pull in cuda_crt.h -- NVIDIA's
+    // barebones-Clang shim -- which redefines size_t and declares NVVM PTX
+    // intrinsics that do not exist on AMD. crt.h now excludes it for HIP, but
+    // that header also supplied two things hiprtc does not provide under
+    // WP_NO_CRT, so replace them here:
+    //
+    //   __brkpt()  a CUDA device builtin with no HIP equivalent. The AOT path
+    //              already maps it this way in build_dll.py; this is the JIT
+    //              equivalent, kept identical on purpose.
+    //   assert()   Warp's device code calls it throughout vec.h/mat.h. hiprtc
+    //              has no assert.h, and device-side abort is not what these
+    //              call sites want in a release build, so compile it out --
+    //              matching cuda_crt.h's own NDEBUG behaviour.
+    translated.push_back("-D__brkpt()=__builtin_trap()");
+    translated.push_back("-Dassert(e)=((void)0)");
+    // NOT -Dmemset=__builtin_memset: hiprtc's own hiprtc_runtime.h declares
+    // memset/memcpy for device code, and the macro rewrites that declaration
+    // into
+    //   error: __device__ function '__builtin_memset' cannot overload
+    //          __host__ __device__ function '__builtin_memset'
+    //
+    // The one remaining call site is radix_sort_pairs_cpu_core in
+    // tile_radix_sort.h -- a CPU-only helper with no CUDA_CALLABLE that is
+    // nevertheless visible to the JIT because builtin.h includes the header
+    // unconditionally. NVIDIA never trips over it because cuda_crt.h declares
+    // a __device__ memset, so the call resolves even though the function is
+    // never called from device code. crt.h supplies the declaration for HIP
+    // instead, next to the exclusion that removed it.
     for (int i = 0; i < numOptions; ++i) {
         const char* o = options ? options[i] : nullptr;
         if (!o)
