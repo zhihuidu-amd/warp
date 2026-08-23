@@ -1018,6 +1018,93 @@ static inline hipError_t wp_hipDrvGetErrorString(hipError_t e, const char** s)
 WP_HIP_PFN(wp_hipDrvGetErrorName, PFN_cuGetErrorName_v6000);
 WP_HIP_PFN(wp_hipDrvGetErrorString, PFN_cuGetErrorString_v6000);
 WP_HIP_PFN(hipGetProcAddress, PFN_cuGetProcAddress_v12000);
+
+// ---------------------------------------------------------------------------
+// Driver loading. cuda_util.cpp's init_cuda_driver() does, literally:
+//
+//     hCudaDriver = dlopen("libcuda.so", RTLD_NOW);          // then "libcuda.so.1"
+//     pfn_cuGetProcAddress = dlsym(hCudaDriver, "cuGetProcAddress");
+//
+// Neither exists on ROCm: there is no libcuda.so, and the entry-point loader is
+// hipGetProcAddress in libamdhip64.so. The dlopen therefore returned NULL, every
+// driver entry point stayed null, and wp_cuda_driver_is_initialized() reported
+// false -- so Warp registered no GPU. The library built, linked and imported
+// perfectly and simply had no driver behind it.
+//
+// The library and symbol names are string literals, which a macro cannot
+// rewrite. But dlopen and dlsym are *identifiers*, so redirect the calls
+// instead and translate the arguments here. Keeps cuda_util.cpp untouched.
+// dlopen/dlsym are redirected by the macros at the end of this block, so these
+// two helpers must be defined BEFORE them -- otherwise the calls inside would be
+// rewritten to call themselves.
+#include <dlfcn.h>
+
+#include <cstdio>
+#include <cstring>
+
+static inline void* wp_hip_dlopen(const char* filename, int flags)
+{
+    if (filename && strncmp(filename, "libcuda.so", 10) == 0)
+        filename = "libamdhip64.so";
+    return dlopen(filename, flags);
+}
+
+// Stands in for cuGetProcAddress. Cannot be hipGetProcAddress directly: Warp
+// asks for CUDA spellings ("cuCtxCreate") with CUDA version numbers (3020),
+// and HIP knows neither. Translate the name to its hip* equivalent and drop
+// the version, which has no meaning across the two APIs.
+static inline hipError_t wp_hip_get_proc_address(
+    const char* symbol, void** pfn, int version, uint64_t flags,
+    hipDriverProcAddressQueryResult* symbolStatus)
+{
+    (void)version;  // CUDA-versioned; not meaningful to HIP
+    if (!symbol || !pfn)
+        return hipErrorInvalidValue;
+
+    // Most names follow "cuFoo" -> "hipFoo", but not all: HIP moved a few verbs
+    // around. Verified against all 80 entry points cuda_util.cpp resolves --
+    // 77 follow the rule, and these do not. cuDeviceGetCount is the one that
+    // matters: it is how Warp counts GPUs, so a miss here means no device is
+    // ever registered.
+    static const struct {
+        const char* cuda;
+        const char* hip;
+    } exceptions[] = {
+        {"cuDeviceGetCount", "hipGetDeviceCount"},
+    };
+    for (const auto& e : exceptions) {
+        if (strcmp(symbol, e.cuda) == 0)
+            return hipGetProcAddress(e.hip, pfn, 0, flags, symbolStatus);
+    }
+
+    // "cuFoo" -> "hipFoo". Warp only ever requests cu* driver entry points here.
+    char translated[160];
+    if (strncmp(symbol, "cu", 2) == 0 && symbol[2] != '\0') {
+        int n = snprintf(translated, sizeof(translated), "hip%s", symbol + 2);
+        if (n <= 0 || static_cast<size_t>(n) >= sizeof(translated))
+            return hipErrorInvalidValue;
+        symbol = translated;
+    }
+
+    hipError_t status = hipGetProcAddress(symbol, pfn, 0, flags, symbolStatus);
+    // Warp tolerates a null entry point and reports it per call site, so a
+    // missing symbol is not fatal here -- but it must not look like success.
+    if (status == hipSuccess && (!pfn || !*pfn))
+        return hipErrorNotFound;
+    return status;
+}
+
+static inline void* wp_hip_dlsym(void* handle, const char* symbol)
+{
+    // Warp resolves exactly one symbol this way; everything else goes through
+    // the loader it returns.
+    if (symbol && strcmp(symbol, "cuGetProcAddress") == 0)
+        return reinterpret_cast<void*>(&wp_hip_get_proc_address);
+    return dlsym(handle, symbol);
+}
+
+#define dlopen wp_hip_dlopen
+#define dlsym wp_hip_dlsym
 // The driver API passes per-edge data and puts the dependency count after
 // it; HIP has no edge-data parameter. Drop it: Warp only uses default
 // edges here, which is what HIP assumes.
