@@ -518,7 +518,43 @@ struct CUmemcpyAttributes {
 using CUDA_ARRAY_DESCRIPTOR = HIP_ARRAY_DESCRIPTOR;
 using CUDA_ARRAY3D_DESCRIPTOR = HIP_ARRAY3D_DESCRIPTOR;
 using CUmipmappedArray = hipmipmappedArray;
-using CUlaunchConfig = hipLaunchConfig_t;
+// Thread-block clusters are a Hopper+ CUDA feature with no AMD equivalent, and
+// the CUDA and HIP launch configs differ in shape: CUDA spells the grid as flat
+// gridDimX/Y/Z fields and carries a clusterDim attribute, while HIP uses a dim3
+// and has no cluster member at all.
+//
+// warp.cu probes the cluster limit with cuOccupancyMaxActiveClusters, which
+// hip_util.h already types as a stub because ROCm has no such entry point. These
+// CUDA-shaped definitions let that probe compile; it reports no cluster support
+// on AMD, which is correct.
+struct wp_hip_cluster_dim {
+    unsigned int x, y, z;
+};
+
+struct wp_hip_launch_attribute_value {
+    wp_hip_cluster_dim clusterDim;
+};
+
+struct wp_hip_launch_attribute {
+    int id;
+    wp_hip_launch_attribute_value value;
+};
+
+struct wp_hip_launch_config {
+    unsigned int gridDimX, gridDimY, gridDimZ;
+    unsigned int blockDimX, blockDimY, blockDimZ;
+    unsigned int sharedMemBytes;
+    hipStream_t hStream;
+    wp_hip_launch_attribute* attrs;
+    unsigned int numAttrs;
+};
+
+using CUlaunchAttribute = wp_hip_launch_attribute;
+using CUlaunchConfig = wp_hip_launch_config;
+
+#ifndef CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+#define CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION 0
+#endif  // CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
 #ifndef cudaStreamGetId
 #define cudaStreamGetId hipStreamGetId
 #endif  // cudaStreamGetId
@@ -887,7 +923,7 @@ WP_HIP_PFN(wp_hipModuleLoadDataEx, PFN_cuModuleLoadDataEx_v2010);
 WP_HIP_PFN(hipModuleUnload, PFN_cuModuleUnload_v2000);
 // OccupancyMaxActiveClusters has no ROCm equivalent; the entry point resolves to
 // null at runtime and callers already handle a missing driver entry.
-using PFN_cuOccupancyMaxActiveClusters_v11070 = hipError_t (*)(int*, hipFunction_t, const hipLaunchConfig_t*);
+using PFN_cuOccupancyMaxActiveClusters_v11070 = hipError_t (*)(int*, hipFunction_t, const CUlaunchConfig*);
 // Overloaded in the HIP headers, so decltype(&f) is ambiguous; state the
 // C signature that the driver entry point actually has.
 // The driver API passes a per-block shared-memory callback; HIP takes a flat
