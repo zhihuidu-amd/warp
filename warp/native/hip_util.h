@@ -1058,3 +1058,38 @@ static inline hipError_t cudaGraphConditionalHandleCreate(cudaGraphConditionalHa
 #ifndef CU_GRAPH_COND_TYPE_WHILE
 #define CU_GRAPH_COND_TYPE_WHILE 1
 #endif  // CU_GRAPH_COND_TYPE_WHILE
+
+// Graph node types. Every one Warp inspects has a direct HIP equivalent.
+#ifndef CU_GRAPH_NODE_TYPE_KERNEL
+#define CU_GRAPH_NODE_TYPE_KERNEL hipGraphNodeTypeKernel
+#endif  // CU_GRAPH_NODE_TYPE_KERNEL
+#ifndef CU_GRAPH_NODE_TYPE_MEMCPY
+#define CU_GRAPH_NODE_TYPE_MEMCPY hipGraphNodeTypeMemcpy
+#endif  // CU_GRAPH_NODE_TYPE_MEMCPY
+#ifndef CU_GRAPH_NODE_TYPE_MEMSET
+#define CU_GRAPH_NODE_TYPE_MEMSET hipGraphNodeTypeMemset
+#endif  // CU_GRAPH_NODE_TYPE_MEMSET
+#ifndef CU_GRAPH_NODE_TYPE_HOST
+#define CU_GRAPH_NODE_TYPE_HOST hipGraphNodeTypeHost
+#endif  // CU_GRAPH_NODE_TYPE_HOST
+#ifndef CU_GRAPH_NODE_TYPE_GRAPH
+#define CU_GRAPH_NODE_TYPE_GRAPH hipGraphNodeTypeGraph
+#endif  // CU_GRAPH_NODE_TYPE_GRAPH
+#ifndef CU_GRAPH_NODE_TYPE_EMPTY
+#define CU_GRAPH_NODE_TYPE_EMPTY hipGraphNodeTypeEmpty
+#endif  // CU_GRAPH_NODE_TYPE_EMPTY
+#ifndef CU_GRAPH_NODE_TYPE_WAIT_EVENT
+#define CU_GRAPH_NODE_TYPE_WAIT_EVENT hipGraphNodeTypeWaitEvent
+#endif  // CU_GRAPH_NODE_TYPE_WAIT_EVENT
+#ifndef CU_GRAPH_NODE_TYPE_EVENT_RECORD
+#define CU_GRAPH_NODE_TYPE_EVENT_RECORD hipGraphNodeTypeEventRecord
+#endif  // CU_GRAPH_NODE_TYPE_EVENT_RECORD
+#ifndef CU_GRAPH_NODE_TYPE_EXT_SEMAS_SIGNAL
+#define CU_GRAPH_NODE_TYPE_EXT_SEMAS_SIGNAL hipGraphNodeTypeExtSemaphoreSignal
+#endif  // CU_GRAPH_NODE_TYPE_EXT_SEMAS_SIGNAL
+#ifndef CU_GRAPH_NODE_TYPE_EXT_SEMAS_WAIT
+#define CU_GRAPH_NODE_TYPE_EXT_SEMAS_WAIT hipGraphNodeTypeExtSemaphoreWait
+#endif  // CU_GRAPH_NODE_TYPE_EXT_SEMAS_WAIT
+#ifndef CU_GRAPH_NODE_TYPE_BATCH_MEM_OP
+#define CU_GRAPH_NODE_TYPE_BATCH_MEM_OP hipGraphNodeTypeBatchMemOp
+#endif  // CU_GRAPH_NODE_TYPE_BATCH_MEM_OP
