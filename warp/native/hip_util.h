@@ -168,6 +168,52 @@ static inline hiprtcResult wp_hiprtcCompileProgram(
             translated.push_back(std::string("-I") + (o + 15));
             continue;
         }
+        // NVRTC-only options. hiprtc rejects each with "unknown argument" and
+        // fails the whole compile, so they are dropped rather than translated.
+        // None changes program semantics on this path:
+        //
+        //   --Ofast-compile=N                 compile-speed/codegen tradeoff
+        //   -pch, --pch-dir=                  precompiled headers; hiprtc has
+        //                                     no equivalent, only a build-time
+        //                                     cost
+        //   --fmad=true|false                 fused multiply-add contraction.
+        //                                     NOT dropped silently below --
+        //                                     see the -ffp-contract mapping
+        //   --device-as-default-execution-space
+        //   --extra-device-vectorization      optimizer hints
+        //   --restrict                        aliasing hint
+        //   --diag-suppress=...               suppresses nvcc diagnostic ids
+        //                                     that do not exist in clang
+        static const char* const nvrtc_only[] = {
+            "--Ofast-compile",
+            "-pch",
+            "--pch-dir=",
+            "--device-as-default-execution-space",
+            "--extra-device-vectorization",
+            "--restrict",
+            "--diag-suppress=",
+        };
+        bool dropped = false;
+        for (const char* p : nvrtc_only) {
+            if (strncmp(o, p, strlen(p)) == 0) {
+                dropped = true;
+                break;
+            }
+        }
+        if (dropped)
+            continue;
+
+        // --fmad controls FMA contraction, which affects numerical results, so
+        // map it rather than drop it. clang spells it -ffp-contract.
+        if (strcmp(o, "--fmad=true") == 0) {
+            translated.push_back("-ffp-contract=fast");
+            continue;
+        }
+        if (strcmp(o, "--fmad=false") == 0) {
+            translated.push_back("-ffp-contract=off");
+            continue;
+        }
+
         translated.emplace_back(o);
     }
     if (!have_arch)
