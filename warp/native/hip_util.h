@@ -88,6 +88,12 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
 #define CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE HIP_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
 #endif  // CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE
+#ifndef CU_POINTER_ATTRIBUTE_IS_MANAGED
+#define CU_POINTER_ATTRIBUTE_IS_MANAGED HIP_POINTER_ATTRIBUTE_IS_MANAGED
+#endif  // CU_POINTER_ATTRIBUTE_IS_MANAGED
+#ifndef CU_POINTER_ATTRIBUTE_MEMORY_TYPE
+#define CU_POINTER_ATTRIBUTE_MEMORY_TYPE HIP_POINTER_ATTRIBUTE_MEMORY_TYPE
+#endif  // CU_POINTER_ATTRIBUTE_MEMORY_TYPE
 #ifndef CU_IPC_HANDLE_SIZE
 #define CU_IPC_HANDLE_SIZE sizeof(CUipcMemHandle)
 #endif  // CU_IPC_HANDLE_SIZE
@@ -97,6 +103,15 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef cudaErrorInvalidValue
 #define cudaErrorInvalidValue hipErrorInvalidValue
 #endif  // cudaErrorInvalidValue
+// The driver-API spelling. HIP unifies the driver and runtime error enums, so
+// both names resolve to the same hipError_t value.
+#ifndef CUDA_ERROR_INVALID_VALUE
+#define CUDA_ERROR_INVALID_VALUE hipErrorInvalidValue
+#endif  // CUDA_ERROR_INVALID_VALUE
+// Stream creation flag. The runtime spelling; HIP names it hipStreamNonBlocking.
+#ifndef cudaStreamNonBlocking
+#define cudaStreamNonBlocking hipStreamNonBlocking
+#endif  // cudaStreamNonBlocking
 #ifndef cudaSuccess
 #define cudaSuccess hipSuccess
 #endif  // cudaSuccess
@@ -229,9 +244,36 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef cudaFuncAttributeMaxDynamicSharedMemorySize
 #define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
 #endif  // cudaFuncAttributeMaxDynamicSharedMemorySize
+// HIP has TWO function-attribute enums and they are not interchangeable:
+//   hipFunction_attribute  (HIP_FUNC_ATTRIBUTE_*)  -- driver API, get and set
+//   hipFuncAttribute       (hipFuncAttribute*)     -- runtime hipFuncSetAttribute
+// Warp declares both cuFuncSetAttribute_f and cuFuncGetAttribute_f as taking
+// CUfunction_attribute, which aliases the driver enum, so this must use the
+// HIP_FUNC_ATTRIBUTE_ spelling. Naming the runtime enumerator here made the
+// setter call fail to resolve. wp_hipFuncSetAttribute below converts to the
+// runtime enum at the boundary.
 #ifndef CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
-#define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES hipFuncAttributeMaxDynamicSharedMemorySize
+#define CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES HIP_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
 #endif  // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
+// Queried through cuFuncGetAttribute_f, which takes a CUfunction_attribute
+// (aliased to hipFunction_attribute) -- these are the HIP_FUNC_ATTRIBUTE_*
+// enumerators, not the hipFuncAttribute* set used by the setter above.
+#ifndef CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+#define CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES HIP_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+#endif  // CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+#ifndef CU_FUNC_ATTRIBUTE_NUM_REGS
+#define CU_FUNC_ATTRIBUTE_NUM_REGS HIP_FUNC_ATTRIBUTE_NUM_REGS
+#endif  // CU_FUNC_ATTRIBUTE_NUM_REGS
+#ifndef CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES
+#define CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES HIP_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES
+#endif  // CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES
+// JIT options passed to cuModuleLoadDataEx_f, typed CUjit_option (hipJitOption).
+#ifndef CU_JIT_ERROR_LOG_BUFFER
+#define CU_JIT_ERROR_LOG_BUFFER hipJitOptionErrorLogBuffer
+#endif  // CU_JIT_ERROR_LOG_BUFFER
+#ifndef CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
+#define CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES hipJitOptionErrorLogBufferSizeBytes
+#endif  // CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
 #ifndef cudaCpuDeviceId
 #define cudaCpuDeviceId hipCpuDeviceId
 #endif  // cudaCpuDeviceId
@@ -462,9 +504,25 @@ using CUstream = hipStream_t;
 using CUevent = hipEvent_t;
 using CUmodule = hipModule_t;
 using CUfunction = hipFunction_t;
-// CUDA types this as an unsigned integer and Warp casts uint64_t to it;
-// HIP types it as void*, where that cast is ill-formed.
-using CUdeviceptr = wp_hip_handle<hipDeviceptr_t>;
+// Deliberately an integer, exactly as CUDA declares it -- NOT a wp_hip_handle.
+//
+// The wrapper approach fails here. Warp writes reinterpret_cast<CUdeviceptr>(p)
+// in warp.cu, and reinterpret_cast to a class type is ill-formed no matter what
+// converting constructors that class provides; a user-defined conversion is
+// never considered. Those call sites are upstream files this backend must not
+// modify, so the type itself has to accept the cast.
+//
+// An integer satisfies every use: reinterpret_cast from void* and static_cast
+// from uint64_t both work, and the assignment back out to uint64_t is implicit.
+// The only places needing care are the driver entry points that take a
+// CUdeviceptr* out-parameter, where HIP expects void**; each is bridged by a
+// wp_hip* wrapper below that reinterprets the pointer at the boundary. That is
+// sound because hipDeviceptr_t is void* and this type is the same width.
+using CUdeviceptr = unsigned long long;
+static_assert(
+    sizeof(CUdeviceptr) == sizeof(hipDeviceptr_t),
+    "CUdeviceptr must be pointer-width: the wrappers below reinterpret "
+    "CUdeviceptr* as void** for HIP's out-parameters.");
 using CUuuid = hipUUID;
 using CUdevice_attribute = hipDeviceAttribute_t;
 using CUipcEventHandle = hipIpcEventHandle_t;
@@ -558,9 +616,67 @@ using CUlaunchConfig = wp_hip_launch_config;
 #ifndef cudaStreamGetId
 #define cudaStreamGetId hipStreamGetId
 #endif  // cudaStreamGetId
+
+// CUDA_MEMCPY3D is NOT a plain alias to HIP_MEMCPY3D: its two device-pointer
+// fields have to hold a CUdeviceptr, which is an integer here (see the
+// CUdeviceptr definition above). texture.cpp writes
+//     copy_params.dstDevice = static_cast<CUdeviceptr>(handle);
+// and assigning an integer to HIP's void* field is invalid ("invalid conversion
+// from 'long long unsigned int' to 'void*'"). Mirroring the layout with integer
+// fields keeps that assignment legal; wp_hipDrvMemcpy3D* converts to the real
+// HIP struct at the call boundary.
+//
+// Defined once, outside the HIP_VERSION split below, so the two branches cannot
+// drift apart. Field names and semantics follow HIP_MEMCPY3D exactly; if ROCm
+// adds a field Warp starts using, this has to be extended.
+struct wp_hip_memcpy3d {
+    size_t srcXInBytes{}, srcY{}, srcZ{};
+    size_t srcLOD{};
+    hipMemoryType srcMemoryType{};
+    const void* srcHost{};
+    CUdeviceptr srcDevice{};
+    hipArray_t srcArray{};
+    void* reserved0{};
+    size_t srcPitch{}, srcHeight{};
+
+    size_t dstXInBytes{}, dstY{}, dstZ{};
+    size_t dstLOD{};
+    hipMemoryType dstMemoryType{};
+    void* dstHost{};
+    CUdeviceptr dstDevice{};
+    hipArray_t dstArray{};
+    void* reserved1{};
+    size_t dstPitch{}, dstHeight{};
+
+    size_t WidthInBytes{}, Height{}, Depth{};
+
+    HIP_MEMCPY3D to_hip() const
+    {
+        HIP_MEMCPY3D p{};
+        p.srcXInBytes = srcXInBytes; p.srcY = srcY; p.srcZ = srcZ;
+        p.srcLOD = srcLOD;
+        p.srcMemoryType = srcMemoryType;
+        p.srcHost = srcHost;
+        p.srcDevice = reinterpret_cast<hipDeviceptr_t>(srcDevice);
+        p.srcArray = srcArray;
+        p.srcPitch = srcPitch; p.srcHeight = srcHeight;
+
+        p.dstXInBytes = dstXInBytes; p.dstY = dstY; p.dstZ = dstZ;
+        p.dstLOD = dstLOD;
+        p.dstMemoryType = dstMemoryType;
+        p.dstHost = dstHost;
+        p.dstDevice = reinterpret_cast<hipDeviceptr_t>(dstDevice);
+        p.dstArray = dstArray;
+        p.dstPitch = dstPitch; p.dstHeight = dstHeight;
+
+        p.WidthInBytes = WidthInBytes; p.Height = Height; p.Depth = Depth;
+        return p;
+    }
+};
+using CUDA_MEMCPY3D = wp_hip_memcpy3d;
+
 #if HIP_VERSION >= 70000000
 using CUDA_MEMCPY2D = hip_Memcpy2D;
-using CUDA_MEMCPY3D = HIP_MEMCPY3D;
 using CUDA_RESOURCE_DESC = HIP_RESOURCE_DESC;
 using CUDA_TEXTURE_DESC = HIP_TEXTURE_DESC;
 using CUDA_RESOURCE_VIEW_DESC = HIP_RESOURCE_VIEW_DESC;
@@ -631,12 +747,16 @@ using CUaddress_mode = HIPaddress_mode;
 #define CU_MEMORYTYPE_ARRAY hipMemoryTypeArray
 #endif  // CU_MEMORYTYPE_ARRAY
 using CUmemorytype = hipMemoryType;
+// Distinct from CUmemorytype above despite the near-identical spelling: this is
+// the memory-pool handle returned by CU_POINTER_ATTRIBUTE_MEMPOOL_HANDLE, not
+// the host/device enum. clang suggests CUmemorytype for the missing name, which
+// would compile and then compare a pool handle as if it were a memory kind.
+using CUmemoryPool = hipMemPool_t;
 #ifndef CUDA_ARRAY3D_SURFACE_LDST
 #define CUDA_ARRAY3D_SURFACE_LDST hipArraySurfaceLoadStore
 #endif  // CUDA_ARRAY3D_SURFACE_LDST
 #else
 using CUDA_MEMCPY2D = HIP_MEMCPY2D;
-using CUDA_MEMCPY3D = HIP_MEMCPY3D;
 using CUDA_RESOURCE_DESC = hipResourceDesc;
 using CUDA_TEXTURE_DESC = hipTextureDesc;
 using CUDA_RESOURCE_VIEW_DESC = hipResourceViewDesc;
@@ -689,7 +809,7 @@ static inline hipError_t wp_hipCreateSurfaceObject(
 }
 
 static inline hipError_t wp_hipMemcpyBatchAsync(
-    wp_hip_handle<hipDeviceptr_t>* dsts, wp_hip_handle<hipDeviceptr_t>* srcs, size_t* sizes,
+    CUdeviceptr* dsts, CUdeviceptr* srcs, size_t* sizes,
     size_t count, hipMemcpyAttributes* attrs, size_t* attrsIdxs, size_t numAttrs, size_t* failIdx,
     hipStream_t stream)
 {
@@ -699,22 +819,41 @@ static inline hipError_t wp_hipMemcpyBatchAsync(
 }
 
 static inline hipError_t wp_hipGraphicsResourceGetMappedPointer(
-    wp_hip_handle<hipDeviceptr_t>* pDevPtr, size_t* pSize, hipGraphicsResource_t resource)
+    CUdeviceptr* pDevPtr, size_t* pSize, hipGraphicsResource_t resource)
 {
     return hipGraphicsResourceGetMappedPointer(
         reinterpret_cast<void**>(pDevPtr), pSize, resource);
 }
 
 static inline hipError_t wp_hipModuleGetGlobal(
-    wp_hip_handle<hipDeviceptr_t>* dptr, size_t* bytes, hipModule_t hmod, const char* name)
+    CUdeviceptr* dptr, size_t* bytes, hipModule_t hmod, const char* name)
 {
     return hipModuleGetGlobal(reinterpret_cast<hipDeviceptr_t*>(dptr), bytes, hmod, name);
 }
 
 static inline hipError_t wp_hipIpcOpenMemHandle(
-    wp_hip_handle<hipDeviceptr_t>* pdptr, hipIpcMemHandle_t handle, unsigned int flags)
+    CUdeviceptr* pdptr, hipIpcMemHandle_t handle, unsigned int flags)
 {
     return hipIpcOpenMemHandle(reinterpret_cast<void**>(pdptr), handle, flags);
+}
+
+// These three take the device pointer BY VALUE. CUdeviceptr is an integer (see
+// its definition above), so they cannot alias the HIP entry points directly the
+// way the out-parameter forms do -- the integer will not convert to void*.
+static inline hipError_t wp_hipPointerGetAttribute(
+    void* data, hipPointer_attribute attribute, CUdeviceptr ptr)
+{
+    return hipPointerGetAttribute(data, attribute, reinterpret_cast<hipDeviceptr_t>(ptr));
+}
+
+static inline hipError_t wp_hipIpcGetMemHandle(hipIpcMemHandle_t* handle, CUdeviceptr devPtr)
+{
+    return hipIpcGetMemHandle(handle, reinterpret_cast<void*>(devPtr));
+}
+
+static inline hipError_t wp_hipIpcCloseMemHandle(CUdeviceptr devPtr)
+{
+    return hipIpcCloseMemHandle(reinterpret_cast<void*>(devPtr));
 }
 
 static inline hipError_t wp_hipTexObjectCreate(
@@ -844,9 +983,9 @@ WP_HIP_PFN(hipGraphicsSubResourceGetMappedArray, PFN_cuGraphicsSubResourceGetMap
 WP_HIP_PFN(hipGraphicsUnmapResources, PFN_cuGraphicsUnmapResources_v3000);
 WP_HIP_PFN(hipGraphicsUnregisterResource, PFN_cuGraphicsUnregisterResource_v3000);
 WP_HIP_PFN(hipInit, PFN_cuInit_v2000);
-WP_HIP_PFN(hipIpcCloseMemHandle, PFN_cuIpcCloseMemHandle_v4010);
+WP_HIP_PFN(wp_hipIpcCloseMemHandle, PFN_cuIpcCloseMemHandle_v4010);
 WP_HIP_PFN(hipIpcGetEventHandle, PFN_cuIpcGetEventHandle_v4010);
-WP_HIP_PFN(hipIpcGetMemHandle, PFN_cuIpcGetMemHandle_v4010);
+WP_HIP_PFN(wp_hipIpcGetMemHandle, PFN_cuIpcGetMemHandle_v4010);
 WP_HIP_PFN(hipIpcOpenEventHandle, PFN_cuIpcOpenEventHandle_v4010);
 WP_HIP_PFN(wp_hipIpcOpenMemHandle, PFN_cuIpcOpenMemHandle_v11000);
 // The driver API launches a hipFunction_t with flat dimensions; the runtime
@@ -859,8 +998,25 @@ WP_HIP_PFN(hipMemGetInfo, PFN_cuMemGetInfo_v3020);
 // hipDrvMemcpy3D*.
 WP_HIP_PFN(hipMemcpyParam2DAsync, PFN_cuMemcpy2DAsync_v3020);
 WP_HIP_PFN(hipMemcpyParam2D, PFN_cuMemcpy2D_v3020);
-WP_HIP_PFN(hipDrvMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
-WP_HIP_PFN(hipDrvMemcpy3D, PFN_cuMemcpy3D_v3020);
+// CUDA_MEMCPY3D is wp_hip_memcpy3d, not HIP_MEMCPY3D (see its definition), so
+// these cannot alias the HIP entry points directly -- the descriptor has to be
+// converted first. Doing it here means texture.cpp needs no change.
+static inline hipError_t wp_hipDrvMemcpy3D(const wp_hip_memcpy3d* pCopy)
+{
+    if (!pCopy)
+        return hipErrorInvalidValue;
+    HIP_MEMCPY3D p = pCopy->to_hip();
+    return hipDrvMemcpy3D(&p);
+}
+static inline hipError_t wp_hipDrvMemcpy3DAsync(const wp_hip_memcpy3d* pCopy, hipStream_t stream)
+{
+    if (!pCopy)
+        return hipErrorInvalidValue;
+    HIP_MEMCPY3D p = pCopy->to_hip();
+    return hipDrvMemcpy3DAsync(&p, stream);
+}
+WP_HIP_PFN(wp_hipDrvMemcpy3DAsync, PFN_cuMemcpy3DAsync_v3020);
+WP_HIP_PFN(wp_hipDrvMemcpy3D, PFN_cuMemcpy3D_v3020);
 WP_HIP_PFN(wp_hipMemcpyBatchAsync, PFN_cuMemcpyBatchAsync_v12080);
 // hipCtxGetDevice reports the device of the CURRENT context, so read a specific
 // context's device by making it current briefly.
@@ -885,8 +1041,10 @@ static inline hipError_t wp_hip_ctx_device(hipCtx_t ctx, int* device)
 
 // The driver API identifies the peers by context; HIP takes device ordinals.
 // hipCtx_t carries its device, so translate rather than guard the call site.
+// Takes CUdeviceptr (an integer) rather than hipDeviceptr_t: Warp calls this
+// with (CUdeviceptr) casts, which no longer convert to void* implicitly.
 static inline hipError_t wp_hipMemcpyPeerAsync(
-    hipDeviceptr_t dst, hipCtx_t dstCtx, hipDeviceptr_t src, hipCtx_t srcCtx, size_t count,
+    CUdeviceptr dst, hipCtx_t dstCtx, CUdeviceptr src, hipCtx_t srcCtx, size_t count,
     hipStream_t stream)
 {
     int dst_dev = 0;
@@ -895,7 +1053,9 @@ static inline hipError_t wp_hipMemcpyPeerAsync(
         return hipErrorInvalidValue;
     if (wp_hip_ctx_device(srcCtx, &src_dev) != hipSuccess)
         return hipErrorInvalidValue;
-    return hipMemcpyPeerAsync(dst, dst_dev, src, src_dev, count, stream);
+    return hipMemcpyPeerAsync(
+        reinterpret_cast<void*>(dst), dst_dev, reinterpret_cast<void*>(src), src_dev, count,
+        stream);
 }
 WP_HIP_PFN(wp_hipMemcpyPeerAsync, PFN_cuMemcpyPeerAsync_v4000);
 // HIP takes a non-const descriptor here where the driver API takes const.
@@ -937,7 +1097,7 @@ static inline hipError_t wp_hipOccupancyMaxPotentialBlockSize(
         gridSize, blockSize, f, dynSharedMemPerBlk, blockSizeLimit);
 }
 WP_HIP_PFN(wp_hipOccupancyMaxPotentialBlockSize, PFN_cuOccupancyMaxPotentialBlockSize_v6050);
-WP_HIP_PFN(hipPointerGetAttribute, PFN_cuPointerGetAttribute_v4000);
+WP_HIP_PFN(wp_hipPointerGetAttribute, PFN_cuPointerGetAttribute_v4000);
 WP_HIP_PFN(hipProfilerStart, PFN_cuProfilerStart_v4000);
 WP_HIP_PFN(hipProfilerStop, PFN_cuProfilerStop_v4000);
 WP_HIP_PFN(hipStreamCreateWithPriority, PFN_cuStreamCreateWithPriority_v5050);
