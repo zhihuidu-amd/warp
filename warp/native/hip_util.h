@@ -116,30 +116,56 @@ static inline const char* wp_hip_arch_string()
 static inline hiprtcResult wp_hiprtcCompileProgram(
     hiprtcProgram prog, int numOptions, const char** options)
 {
-    // Replace any NVIDIA arch option with the AMD offload target. Everything
-    // else Warp passes (--include-path, --std=c++17, ...) hiprtc understands
-    // as-is and is forwarded untouched.
-    std::vector<const char*> rewritten;
-    std::string offload = std::string("--offload-arch=") + wp_hip_arch_string();
+    // Translate the options Warp builds for NVRTC into the spellings hiprtc
+    // accepts. Two need changing:
+    //
+    //   --gpu-architecture=sm_NN  ->  --offload-arch=gfxNNN[:features]
+    //   --include-path=DIR        ->  -IDIR
+    //
+    // hiprtc does not understand --include-path: it matches the prefix
+    // "--include" and then treats the remainder as a filename, failing with
+    //     fatal error: '-path=/path/to/warp/native' file not found
+    // which surfaces only as HIPRTC_ERROR_COMPILATION at kernel JIT time.
+    //
+    // Build the translated list as strings first. Every option is copied, so
+    // there is no mix of owned and borrowed pointers to keep straight, and the
+    // c_str() pointers are only taken once the vector has stopped growing --
+    // taking them earlier would dangle on reallocation.
+    std::vector<std::string> translated;
     bool have_arch = false;
 
-    if (numOptions > 0)
-        rewritten.reserve(size_t(numOptions));
+    translated.reserve(size_t(numOptions > 0 ? numOptions : 0) + 1);
     for (int i = 0; i < numOptions; ++i) {
         const char* o = options ? options[i] : nullptr;
         if (!o)
             continue;
         if (strncmp(o, "--gpu-architecture=", 19) == 0 || strncmp(o, "-arch=", 6) == 0) {
             if (!have_arch) {
-                rewritten.push_back(offload.c_str());
+                translated.push_back(std::string("--offload-arch=") + wp_hip_arch_string());
                 have_arch = true;
             }
             continue;  // drop the sm_/compute_ form entirely
         }
-        rewritten.push_back(o);
+        if (strncmp(o, "--include-path=", 15) == 0) {
+            translated.push_back(std::string("-I") + (o + 15));
+            continue;
+        }
+        translated.emplace_back(o);
     }
     if (!have_arch)
-        rewritten.push_back(offload.c_str());
+        translated.push_back(std::string("--offload-arch=") + wp_hip_arch_string());
+
+    std::vector<const char*> rewritten;
+    rewritten.reserve(translated.size());
+    for (const std::string& s : translated)
+        rewritten.push_back(s.c_str());
+
+    if (getenv("WP_HIP_DEBUG_JIT")) {
+        fprintf(stderr, "[wp_hip] hiprtc options:");
+        for (const char* o : rewritten)
+            fprintf(stderr, " %s", o);
+        fprintf(stderr, "\n");
+    }
 
     return hiprtcCompileProgram(prog, int(rewritten.size()), rewritten.data());
 }
