@@ -42,7 +42,15 @@ struct alignas(16) float4 {
 #endif
 
 #if defined(__CUDA_ARCH__) && !defined(__INTELLISENSE__)
-#if defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+// __HIP__ belongs in this branch: hipcc is clang and needs the _Pragma form.
+// The #else expands to a literal `#pragma`, which is not valid inside a macro
+// body and gives "expected expression" at every use site -- ~40 of them in this
+// header alone. NVCC accepts the token-paste form, so the omission only shows
+// on a clang-based compiler that is not clang-CUDA, i.e. exactly hipcc.
+//
+// This became reachable only once __CUDA_ARCH__ was defined for HIP: before
+// that, line 44 was false and both macros expanded to nothing.
+#if defined(__CUDACC_RTC__) || defined(__HIP__) || (defined(__clang__) && defined(__CUDA__))
 #define WP_PRAGMA_UNROLL _Pragma("unroll")
 #define WP_PRAGMA_NO_UNROLL _Pragma("unroll 1")
 #else

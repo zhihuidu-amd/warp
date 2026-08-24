@@ -22,10 +22,15 @@
 #define WP_TILE_WARP_SIZE 64
 #define WP_TILE_FULL_WARP_MASK 0xffffffffffffffffull
 #define WP_TILE_POPC(mask) __popcll(mask)
+// __ffs must widen with the mask for the same reason __popc does. HIP overloads
+// __ffs(int) and __ffsll(long long), so passing a 64-bit mask to __ffs is
+// ambiguous rather than truncating -- "call to '__ffs' is ambiguous".
+#define WP_TILE_FFS(mask) __ffsll(mask)
 #else
 #define WP_TILE_WARP_SIZE 32
 #define WP_TILE_FULL_WARP_MASK 0xffffffffu
 #define WP_TILE_POPC(mask) __popc(mask)
+#define WP_TILE_FFS(mask) __ffs(mask)
 #endif
 
 // Type wide enough for one bit per lane.
@@ -371,7 +376,7 @@ template <typename Tile, typename Op> CUDA_CALLABLE_DEVICE auto tile_reduce_impl
             block_sum = warp_reduce(thread_sum, f, mask);
 
         // write from first active lane (warp_reduce result is only valid there)
-        int first_active = __ffs(mask) - 1;
+        int first_active = WP_TILE_FFS(mask) - 1;
         if (threadIdx.x == first_active)
             output.data[0] = block_sum;
     } else {
@@ -522,7 +527,7 @@ template <int Axis, typename Op, typename Tile> CUDA_CALLABLE_DEVICE auto tile_r
                     block_sum = warp_reduce(thread_sum, f, mask);
 
                 // write from first active lane (warp_reduce result is only valid there)
-                int first_active = __ffs(mask) - 1;
+                int first_active = WP_TILE_FFS(mask) - 1;
                 if (threadIdx.x == first_active)
                     output_buffer[out_idx] = block_sum;
             } else {
@@ -840,7 +845,7 @@ template <typename TileA, typename TileB> CUDA_CALLABLE auto tile_dot(TileA& a, 
         if (has_data)
             result = warp_reduce(thread_sum, add_op, mask);
 
-        int first_active = __ffs(mask) - 1;
+        int first_active = WP_TILE_FFS(mask) - 1;
         if (threadIdx.x == first_active)
             output.data[0] = result;
     } else {

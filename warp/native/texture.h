@@ -686,7 +686,13 @@ template <typename T> struct texture_sample_helper;
 template <> struct texture_sample_helper<float> {
     static CUDA_CALLABLE float sample_1d(const texture1d_t& tex, float u, float lod)
     {
-#if defined(__CUDA_ARCH__)
+// Texture sampling falls back to the CPU sampler on HIP. CUDA's templated
+// tex1D<T>/tex2D<T>/texNDLod<T> family has no equivalent in ROCm's much smaller
+// texture_fetch_functions.h, and the #else branch below is a complete software
+// sampler that produces correct results. Physics workloads do not sample
+// textures, so the performance difference does not arise there; a real HIP
+// texture path is deferred rather than faked.
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         if (lod < 0.0f)
             return tex1D<float>(tex.tex, u);
         return tex1DLod<float>(tex.tex, u, lod);
@@ -702,7 +708,7 @@ template <> struct texture_sample_helper<float> {
 
     static CUDA_CALLABLE float sample_2d(const texture2d_t& tex, float u, float v, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         if (lod < 0.0f)
             return tex2D<float>(tex.tex, u, v);
         return tex2DLod<float>(tex.tex, u, v, lod);
@@ -718,7 +724,7 @@ template <> struct texture_sample_helper<float> {
 
     static CUDA_CALLABLE float sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         if (lod < 0.0f)
             return tex3D<float>(tex.tex, u, v, w);
         return tex3DLod<float>(tex.tex, u, v, w, lod);
@@ -738,7 +744,7 @@ template <> struct texture_sample_helper<float> {
 template <> struct texture_sample_helper<vec2f> {
     static CUDA_CALLABLE vec2f sample_1d(const texture1d_t& tex, float u, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         float2 val = (lod < 0.0f) ? tex1D<float2>(tex.tex, u) : tex1DLod<float2>(tex.tex, u, lod);
         return vec2f(val.x, val.y);
 #else
@@ -755,7 +761,7 @@ template <> struct texture_sample_helper<vec2f> {
 
     static CUDA_CALLABLE vec2f sample_2d(const texture2d_t& tex, float u, float v, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         float2 val = (lod < 0.0f) ? tex2D<float2>(tex.tex, u, v) : tex2DLod<float2>(tex.tex, u, v, lod);
         return vec2f(val.x, val.y);
 #else
@@ -772,7 +778,7 @@ template <> struct texture_sample_helper<vec2f> {
 
     static CUDA_CALLABLE vec2f sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         float2 val = (lod < 0.0f) ? tex3D<float2>(tex.tex, u, v, w) : tex3DLod<float2>(tex.tex, u, v, w, lod);
         return vec2f(val.x, val.y);
 #else
@@ -794,7 +800,7 @@ template <> struct texture_sample_helper<vec2f> {
 template <> struct texture_sample_helper<vec4f> {
     static CUDA_CALLABLE vec4f sample_1d(const texture1d_t& tex, float u, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         float4 val = (lod < 0.0f) ? tex1D<float4>(tex.tex, u) : tex1DLod<float4>(tex.tex, u, lod);
         return vec4f(val.x, val.y, val.z, val.w);
 #else
@@ -815,7 +821,7 @@ template <> struct texture_sample_helper<vec4f> {
 
     static CUDA_CALLABLE vec4f sample_2d(const texture2d_t& tex, float u, float v, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         float4 val = (lod < 0.0f) ? tex2D<float4>(tex.tex, u, v) : tex2DLod<float4>(tex.tex, u, v, lod);
         return vec4f(val.x, val.y, val.z, val.w);
 #else
@@ -837,7 +843,7 @@ template <> struct texture_sample_helper<vec4f> {
 
     static CUDA_CALLABLE vec4f sample_3d(const texture3d_t& tex, float u, float v, float w, float lod)
     {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
         float4 val = (lod < 0.0f) ? tex3D<float4>(tex.tex, u, v, w) : tex3DLod<float4>(tex.tex, u, v, w, lod);
         return vec4f(val.x, val.y, val.z, val.w);
 #else

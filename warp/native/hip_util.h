@@ -240,6 +240,10 @@ static inline hiprtcResult wp_hiprtcCompileProgram(
     //              call sites want in a release build, so compile it out --
     //              matching cuda_crt.h's own NDEBUG behaviour.
     translated.push_back("-D__brkpt()=__builtin_trap()");
+    // __trap() is the same case: a CUDA device builtin with no HIP
+    // equivalent, called from tile.h's float4 alignment check. Only
+    // reachable now that __CUDA_ARCH__ selects the device path.
+    translated.push_back("-D__trap()=__builtin_trap()");
     translated.push_back("-Dassert(e)=((void)0)");
     // NOT -Dmemset=__builtin_memset: hiprtc's own hiprtc_runtime.h declares
     // memset/memcpy for device code, and the macro rewrites that declaration

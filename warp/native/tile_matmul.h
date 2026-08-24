@@ -346,7 +346,10 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul(
+// CUDA_CALLABLE: this calls WP_TILE_SYNC() -> __syncthreads(), which clang
+// rejects from a host function. NVCC accepts it, so the missing annotation
+// only shows on hipcc, and only once __CUDA_ARCH__ selects the device path.
+CUDA_CALLABLE TileC& tile_matmul(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -396,7 +399,10 @@ template <
     typename TileC,
     typename Alpha,
     typename Beta>
-TileC& tile_matmul_acc(
+// CUDA_CALLABLE: this calls WP_TILE_SYNC() -> __syncthreads(), which clang
+// rejects from a host function. NVCC accepts it, so the missing annotation
+// only shows on hipcc, and only once __CUDA_ARCH__ selects the device path.
+CUDA_CALLABLE TileC& tile_matmul_acc(
     Fwd fun_forward, AdjA fun_backward_A, AdjB fun_backward_B, TileA& A, TileB& B, TileC& C, Alpha& alpha, Beta& beta
 )
 {
@@ -449,7 +455,10 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul_acc(
+// CUDA_CALLABLE for the same reason as the forward pass above: this calls
+// WP_TILE_SYNC() -> __syncthreads() and clang rejects that from a host
+// function.
+CUDA_CALLABLE void adj_tile_matmul_acc(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,
@@ -529,7 +538,10 @@ template <
     typename Beta,
     typename AdjAlpha,
     typename AdjBeta>
-void adj_tile_matmul(
+// CUDA_CALLABLE for the same reason as the forward pass above: this calls
+// WP_TILE_SYNC() -> __syncthreads() and clang rejects that from a host
+// function.
+CUDA_CALLABLE void adj_tile_matmul(
     Fwd fun_forward,
     AdjA fun_backward_A,
     AdjB fun_backward_B,

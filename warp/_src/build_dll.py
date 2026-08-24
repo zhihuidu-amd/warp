@@ -724,6 +724,9 @@ def build_dll_for_arch(
             # to be defined on the command line. __builtin_trap() lowers to the
             # same s_trap instruction on AMDGCN.
             '-D"__brkpt()=__builtin_trap()"',
+            # __trap() likewise: CUDA-only, called from tile.h's alignment
+            # check. Same lowering, same reason it cannot live in the shim.
+            '-D"__trap()=__builtin_trap()"',
             # hipcc's bundled LLVM carries a CUDA-targeted Thrust that expects
             # CUB's internals. rocThrust is the right implementation here.
             "-DTHRUST_DEVICE_SYSTEM=THRUST_DEVICE_SYSTEM_HIP",
