@@ -35,6 +35,27 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+// The driver version has two incompatible readers, the same split already
+// applied to CUDA_VERSION. wp_cuda_driver_version() (defined below) is what
+// Python reads to build min_driver_version, so it must report ROCm's real
+// version in CUDA's major*1000 + minor*10 scheme -- 7020 for ROCm 7.2.
+//
+// C++ call sites read the same number as a feature predicate:
+// ">= 12040" gates the capture-safe fill path, ">= 12080" the batched memcpy.
+// 7020 fails both and silently disables capabilities ROCm has. Those sites go
+// through this instead, because on ROCm availability is answered by the
+// entry-point table in native/hip_util.h, not by a version number; anything
+// genuinely missing resolves to null and is handled at its call site.
+static inline int wp_cuda_driver_feature_version()
+{
+    return WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT;
+}
+#else
+int wp_cuda_driver_version();
+static inline int wp_cuda_driver_feature_version() { return wp_cuda_driver_version(); }
+#endif
+
 #define check_any(result) (check_generic(result, __FILE__, __LINE__))
 #define check_nvrtc(code) (check_nvrtc_result(code, __FILE__, __LINE__))
 #define check_nvptx(code) (check_nvptx_result(code, __FILE__, __LINE__))
@@ -453,25 +474,6 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
     int device_ordinal = wp_cuda_context_get_device_ordinal(context);
     void* devptr = NULL;
     bool free_devptr = true;
-#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
-// Same two-roles split as CUDA_VERSION. wp_cuda_driver_version() above is what
-// Python reads to build min_driver_version, so it must stay in CUDA's
-// major*1000 + minor*10 scheme (7020 on ROCm 7.2). But C++ call sites use the
-// same number as a feature predicate -- "wp_cuda_driver_version() >= 12040"
-// gates the capture-safe fill path, ">= 12080" the batched memcpy -- and 7020
-// fails both, disabling capabilities ROCm actually has.
-//
-// Those call sites go through this instead. The availability question on ROCm
-// is answered by the entry-point table in native/hip_util.h, so report a value
-// that passes; anything genuinely missing is null and handled per call site.
-static inline int wp_cuda_driver_feature_version()
-{
-    return WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT;
-}
-#else
-int wp_cuda_driver_version();
-static inline int wp_cuda_driver_feature_version() { return wp_cuda_driver_version(); }
-#endif
 
 
     if (capture_info) {
