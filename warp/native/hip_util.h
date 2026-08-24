@@ -8,6 +8,21 @@
 #include <hip/hip_runtime_api.h>
 #include <hip/hiprtc.h>
 
+// __CUDA_ARCH__ selects the DEVICE implementation throughout Warp (119 uses
+// across 15 headers). HIP spells the same thing __HIP_DEVICE_COMPILE__, so
+// without this the device blocks are compiled out and only the CPU
+// implementations survive. See the -D__CUDA_ARCH__=700 option in
+// wp_hiprtcCompileProgram below for why 700, and why the JIT path needs the
+// option rather than this definition.
+//
+// This covers the AOT build, where hip_util.h IS included. It does not reach
+// JIT-compiled kernels: tile.h includes this header only under
+// `#elif WP_ENABLE_HIP`, and the `defined(__CUDACC_RTC__)` branch above it wins
+// there.
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(__CUDA_ARCH__)
+#define __CUDA_ARCH__ 700
+#endif
+
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -190,6 +205,26 @@ static inline hiprtcResult wp_hiprtcCompileProgram(
     // Thrust code reaches hiprtc -- deterministic.cu is AOT-only and excluded
     // from HIP builds entirely.
     translated.push_back("-D__CUDACC__");
+
+    // __CUDA_ARCH__ has to be an OPTION, not a #define in this header, because
+    // this header is not included by JIT-compiled kernels at all: tile.h only
+    // pulls it in under `#elif WP_ENABLE_HIP`, and the branch above it
+    // (`defined(__CUDACC_RTC__)`) wins in the JIT. So a definition here reaches
+    // the AOT build and never the kernels.
+    //
+    // It selects the DEVICE implementation throughout Warp -- 119 uses across
+    // 15 headers, including the ~900-line block in tile_radix_sort.h holding
+    // the device tile_sort overloads. Undefined, those blocks vanish and only
+    // the CPU versions remain, which surfaces as
+    //     error: no matching function for call to 'tile_sort'
+    //     note: candidate not viable: call to __host__ function from __global__
+    // i.e. the device overload was never declared.
+    //
+    // 700 specifically: nine sites compare it numerically, and every >= 800 /
+    // >= 900 branch emits inline PTX (cvt.rn.bf16.f32, add.bf16,
+    // atom.add.noftz.bf16) that has no AMD equivalent. The >= 700 branches are
+    // the portable fallbacks over atomicAdd/atomicCAS, which HIP provides.
+    translated.push_back("-D__CUDA_ARCH__=700");
 
     // With __CUDACC__ defined, crt.h would pull in cuda_crt.h -- NVIDIA's
     // barebones-Clang shim -- which redefines size_t and declares NVVM PTX
