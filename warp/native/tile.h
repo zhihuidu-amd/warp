@@ -255,7 +255,8 @@ template <int N> struct tile_coord_t {
 };
 
 // This function deduces N = sizeof...(Ints)
-template <typename... Ints> constexpr tile_coord_t<sizeof...(Ints)> tile_coord(Ints... idxs)
+template <typename... Ints>
+constexpr CUDA_CALLABLE tile_coord_t<sizeof...(Ints)> tile_coord(Ints... idxs)
 {
     constexpr int N = sizeof...(Ints);
 
@@ -274,14 +275,14 @@ template <typename... Ints> constexpr tile_coord_t<sizeof...(Ints)> tile_coord(I
 }
 
 // helpers to construct a coord from a set of indices
-inline auto tile_coord(int i)
+inline CUDA_CALLABLE auto tile_coord(int i)
 {
     auto c = tile_coord_t<1>();
     c.indices[0] = i;
     return c;
 }
 
-inline auto tile_coord(int i, int j)
+inline CUDA_CALLABLE auto tile_coord(int i, int j)
 {
     auto c = tile_coord_t<2>();
     c.indices[0] = i;
@@ -289,7 +290,7 @@ inline auto tile_coord(int i, int j)
     return c;
 }
 
-inline auto tile_coord(int i, int j, int k)
+inline CUDA_CALLABLE auto tile_coord(int i, int j, int k)
 {
     auto c = tile_coord_t<3>();
     c.indices[0] = i;
@@ -298,7 +299,7 @@ inline auto tile_coord(int i, int j, int k)
     return c;
 }
 
-inline auto tile_coord(int i, int j, int k, int l)
+inline CUDA_CALLABLE auto tile_coord(int i, int j, int k, int l)
 {
     auto c = tile_coord_t<4>();
     c.indices[0] = i;
@@ -726,7 +727,11 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
     array_t<T> data;
     Coord offset;
 
-    tile_global_t(array_t<T>& a, const Coord& c)
+    // CUDA_CALLABLE: constructed by tile_load() from device code. clang (and
+    // therefore hiprtc) rejects a host-only constructor called from a
+    // __host__ __device__ function; NVRTC does not, so this is invisible on
+    // NVIDIA.
+    inline CUDA_CALLABLE tile_global_t(array_t<T>& a, const Coord& c)
         : data(a)
         , offset(c)
     {
@@ -1379,7 +1384,12 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     struct Storage {
         T* ptr;
 
-        Storage(T* p)
+        // CUDA_CALLABLE: this is constructed from device code (tile_shared_t's
+        // own constructors initialise data/grad), and clang -- which is what
+        // hiprtc is -- rejects calling a host-only constructor from a
+        // __host__ __device__ function. NVRTC tolerates it, so the omission is
+        // invisible on NVIDIA.
+        inline CUDA_CALLABLE Storage(T* p)
             : ptr(p)
         {
         }
