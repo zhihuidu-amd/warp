@@ -10,3 +10,18 @@
 #pragma once
 
 #include <limits>
+
+// Forwarding the include is not enough on its own: callers name the symbols
+// through the cuda::std namespace, e.g. cuBQL/math/math.h has
+//
+//     #ifdef __CUDA_ARCH__
+//     # define CUBQL_INF ::cuda::std::numeric_limits<float>::infinity()
+//
+// which fails with "no member named 'cuda' in the global namespace" once
+// __CUDA_ARCH__ is defined for HIP. Alias the namespace so those qualified
+// names resolve to the standard library.
+namespace cuda {
+namespace std {
+using namespace ::std;
+}  // namespace std
+}  // namespace cuda
