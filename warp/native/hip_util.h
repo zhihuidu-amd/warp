@@ -1263,49 +1263,134 @@ static inline void* wp_hip_dlopen(const char* filename, int flags)
     return dlopen(filename, flags);
 }
 
-// Stands in for cuGetProcAddress. Cannot be hipGetProcAddress directly: Warp
-// asks for CUDA spellings ("cuCtxCreate") with CUDA version numbers (3020),
-// and HIP knows neither. Translate the name to its hip* equivalent and drop
-// the version, which has no meaning across the two APIs.
+// Stands in for cuGetProcAddress.
+//
+// An explicit table, deliberately not a "cuFoo" -> "hipFoo" name rule, and the
+// distinction is load-bearing. Warp resolves ~80 driver entry points by string
+// at runtime, while WP_HIP_PFN declares the intended HIP function as a TYPE.
+// When the two disagree the compiler cannot see it: the pointer is bound by
+// name, so a wrong-but-real function is installed and fails only when called.
+//
+// A name rule got this wrong in sixteen places. Every wp_* adapter in this
+// header -- the CUdeviceptr integer conversions, the driver-version
+// re-encoding, the context-to-ordinal translation, the MEMCPY3D descriptor
+// rebuild -- was silently bypassed, because the rule resolved past it to the
+// raw HIP function. cuLaunchKernel is the one that surfaced: it bound
+// hipLaunchKernel (runtime API, 6 args, host function pointer) instead of
+// hipModuleLaunchKernel (driver API, 11 args, hipFunction_t), so every kernel
+// launch returned hipErrorInvalidDeviceFunction while compile, module load and
+// symbol lookup all succeeded.
+//
+// Generated from the WP_HIP_PFN declarations, so name and type cannot drift
+// apart. Taking each function's address also makes the linker check every
+// entry: a misspelling is a build error rather than a runtime surprise.
 static inline hipError_t wp_hip_get_proc_address(
     const char* symbol, void** pfn, int version, uint64_t flags,
     hipDriverProcAddressQueryResult* symbolStatus)
 {
     (void)version;  // CUDA-versioned; not meaningful to HIP
+    (void)flags;
     if (!symbol || !pfn)
         return hipErrorInvalidValue;
 
-    // Most names follow "cuFoo" -> "hipFoo", but not all: HIP moved a few verbs
-    // around. Verified against all 80 entry points cuda_util.cpp resolves --
-    // 77 follow the rule, and these do not. cuDeviceGetCount is the one that
-    // matters: it is how Warp counts GPUs, so a miss here means no device is
-    // ever registered.
     static const struct {
         const char* cuda;
-        const char* hip;
-    } exceptions[] = {
-        {"cuDeviceGetCount", "hipGetDeviceCount"},
+        void* fn;
+    } entries[] = {
+    {"cuArray3DCreate", reinterpret_cast<void*>(&hipArray3DCreate)},
+    {"cuArray3DGetDescriptor", reinterpret_cast<void*>(&hipArray3DGetDescriptor)},
+    {"cuArrayCreate", reinterpret_cast<void*>(&hipArrayCreate)},
+    {"cuArrayDestroy", reinterpret_cast<void*>(&hipArrayDestroy)},
+    {"cuCtxCreate", reinterpret_cast<void*>(&hipCtxCreate)},
+    {"cuCtxDestroy", reinterpret_cast<void*>(&hipCtxDestroy)},
+    {"cuCtxDisablePeerAccess", reinterpret_cast<void*>(&hipCtxDisablePeerAccess)},
+    {"cuCtxEnablePeerAccess", reinterpret_cast<void*>(&hipCtxEnablePeerAccess)},
+    {"cuCtxGetCurrent", reinterpret_cast<void*>(&hipCtxGetCurrent)},
+    {"cuCtxGetDevice", reinterpret_cast<void*>(&hipCtxGetDevice)},
+    {"cuCtxPopCurrent", reinterpret_cast<void*>(&hipCtxPopCurrent)},
+    {"cuCtxPushCurrent", reinterpret_cast<void*>(&hipCtxPushCurrent)},
+    {"cuCtxSetCurrent", reinterpret_cast<void*>(&hipCtxSetCurrent)},
+    {"cuCtxSynchronize", reinterpret_cast<void*>(&hipCtxSynchronize)},
+    {"cuDeviceCanAccessPeer", reinterpret_cast<void*>(&hipDeviceCanAccessPeer)},
+    {"cuDeviceGet", reinterpret_cast<void*>(&hipDeviceGet)},
+    {"cuDeviceGetAttribute", reinterpret_cast<void*>(&hipDeviceGetAttribute)},
+    {"cuDeviceGetCount", reinterpret_cast<void*>(&hipGetDeviceCount)},
+    {"cuDeviceGetName", reinterpret_cast<void*>(&hipDeviceGetName)},
+    {"cuDeviceGetUuid", reinterpret_cast<void*>(&hipDeviceGetUuid)},
+    {"cuDevicePrimaryCtxRelease", reinterpret_cast<void*>(&hipDevicePrimaryCtxRelease)},
+    {"cuDevicePrimaryCtxRetain", reinterpret_cast<void*>(&hipDevicePrimaryCtxRetain)},
+    {"cuDriverGetVersion", reinterpret_cast<void*>(&wp_hipDriverGetVersion)},
+    {"cuEventCreate", reinterpret_cast<void*>(&hipEventCreateWithFlags)},
+    {"cuEventDestroy", reinterpret_cast<void*>(&hipEventDestroy)},
+    {"cuEventQuery", reinterpret_cast<void*>(&hipEventQuery)},
+    {"cuEventRecord", reinterpret_cast<void*>(&hipEventRecord)},
+    {"cuEventRecordWithFlags", reinterpret_cast<void*>(&hipEventRecordWithFlags)},
+    {"cuEventSynchronize", reinterpret_cast<void*>(&hipEventSynchronize)},
+    {"cuFuncGetAttribute", reinterpret_cast<void*>(&hipFuncGetAttribute)},
+    {"cuFuncSetAttribute", reinterpret_cast<void*>(&wp_hipFuncSetAttribute)},
+    {"cuGetErrorName", reinterpret_cast<void*>(&wp_hipDrvGetErrorName)},
+    {"cuGetErrorString", reinterpret_cast<void*>(&wp_hipDrvGetErrorString)},
+    {"cuGraphAddNode", reinterpret_cast<void*>(&wp_hipGraphAddNode)},
+    {"cuGraphNodeGetDependentNodes", reinterpret_cast<void*>(&hipGraphNodeGetDependentNodes)},
+    {"cuGraphNodeGetType", reinterpret_cast<void*>(&hipGraphNodeGetType)},
+    {"cuGraphicsMapResources", reinterpret_cast<void*>(&hipGraphicsMapResources)},
+    {"cuGraphicsResourceGetMappedPointer", reinterpret_cast<void*>(&wp_hipGraphicsResourceGetMappedPointer)},
+    {"cuGraphicsUnmapResources", reinterpret_cast<void*>(&hipGraphicsUnmapResources)},
+    {"cuGraphicsUnregisterResource", reinterpret_cast<void*>(&hipGraphicsUnregisterResource)},
+    {"cuInit", reinterpret_cast<void*>(&hipInit)},
+    {"cuIpcCloseMemHandle", reinterpret_cast<void*>(&wp_hipIpcCloseMemHandle)},
+    {"cuIpcGetEventHandle", reinterpret_cast<void*>(&hipIpcGetEventHandle)},
+    {"cuIpcGetMemHandle", reinterpret_cast<void*>(&wp_hipIpcGetMemHandle)},
+    {"cuIpcOpenEventHandle", reinterpret_cast<void*>(&hipIpcOpenEventHandle)},
+    {"cuIpcOpenMemHandle", reinterpret_cast<void*>(&wp_hipIpcOpenMemHandle)},
+    {"cuLaunchKernel", reinterpret_cast<void*>(&hipModuleLaunchKernel)},
+    {"cuMemGetInfo", reinterpret_cast<void*>(&hipMemGetInfo)},
+    {"cuMemcpy2D", reinterpret_cast<void*>(&hipMemcpyParam2D)},
+    {"cuMemcpy2DAsync", reinterpret_cast<void*>(&hipMemcpyParam2DAsync)},
+    {"cuMemcpy3D", reinterpret_cast<void*>(&wp_hipDrvMemcpy3D)},
+    {"cuMemcpy3DAsync", reinterpret_cast<void*>(&wp_hipDrvMemcpy3DAsync)},
+    {"cuMemcpyBatchAsync", reinterpret_cast<void*>(&wp_hipMemcpyBatchAsync)},
+    {"cuMemcpyPeerAsync", reinterpret_cast<void*>(&wp_hipMemcpyPeerAsync)},
+    {"cuMipmappedArrayCreate", reinterpret_cast<void*>(&wp_hipMipmappedArrayCreate)},
+    {"cuMipmappedArrayDestroy", reinterpret_cast<void*>(&hipMipmappedArrayDestroy)},
+    {"cuMipmappedArrayGetLevel", reinterpret_cast<void*>(&hipMipmappedArrayGetLevel)},
+    {"cuModuleGetFunction", reinterpret_cast<void*>(&hipModuleGetFunction)},
+    {"cuModuleGetGlobal", reinterpret_cast<void*>(&wp_hipModuleGetGlobal)},
+    {"cuModuleLoadDataEx", reinterpret_cast<void*>(&wp_hipModuleLoadDataEx)},
+    {"cuModuleUnload", reinterpret_cast<void*>(&hipModuleUnload)},
+    {"cuOccupancyMaxPotentialBlockSize", reinterpret_cast<void*>(&wp_hipOccupancyMaxPotentialBlockSize)},
+    {"cuPointerGetAttribute", reinterpret_cast<void*>(&wp_hipPointerGetAttribute)},
+    {"cuProfilerStart", reinterpret_cast<void*>(&hipProfilerStart)},
+    {"cuProfilerStop", reinterpret_cast<void*>(&hipProfilerStop)},
+    {"cuStreamCreate", reinterpret_cast<void*>(&hipStreamCreateWithFlags)},
+    {"cuStreamCreateWithPriority", reinterpret_cast<void*>(&hipStreamCreateWithPriority)},
+    {"cuStreamDestroy", reinterpret_cast<void*>(&hipStreamDestroy)},
+    {"cuStreamGetCaptureInfo", reinterpret_cast<void*>(&wp_hipStreamGetCaptureInfo)},
+    {"cuStreamGetPriority", reinterpret_cast<void*>(&hipStreamGetPriority)},
+    {"cuStreamQuery", reinterpret_cast<void*>(&hipStreamQuery)},
+    {"cuStreamSynchronize", reinterpret_cast<void*>(&hipStreamSynchronize)},
+    {"cuStreamUpdateCaptureDependencies", reinterpret_cast<void*>(&hipStreamUpdateCaptureDependencies)},
+    {"cuStreamWaitEvent", reinterpret_cast<void*>(&hipStreamWaitEvent)},
+    {"cuTexObjectCreate", reinterpret_cast<void*>(&wp_hipTexObjectCreate)},
+    {"cuTexObjectDestroy", reinterpret_cast<void*>(&hipTexObjectDestroy)},
     };
-    for (const auto& e : exceptions) {
-        if (strcmp(symbol, e.cuda) == 0)
-            return hipGetProcAddress(e.hip, pfn, 0, flags, symbolStatus);
+
+    for (const auto& e : entries) {
+        if (strcmp(symbol, e.cuda) == 0) {
+            *pfn = e.fn;
+            if (symbolStatus)
+                *symbolStatus = HIP_GET_PROC_ADDRESS_SUCCESS;
+            return hipSuccess;
+        }
     }
 
-    // "cuFoo" -> "hipFoo". Warp only ever requests cu* driver entry points here.
-    char translated[160];
-    if (strncmp(symbol, "cu", 2) == 0 && symbol[2] != '\0') {
-        int n = snprintf(translated, sizeof(translated), "hip%s", symbol + 2);
-        if (n <= 0 || static_cast<size_t>(n) >= sizeof(translated))
-            return hipErrorInvalidValue;
-        symbol = translated;
-    }
-
-    hipError_t status = hipGetProcAddress(symbol, pfn, 0, flags, symbolStatus);
-    // Warp tolerates a null entry point and reports it per call site, so a
-    // missing symbol is not fatal here -- but it must not look like success.
-    if (status == hipSuccess && (!pfn || !*pfn))
-        return hipErrorNotFound;
-    return status;
+    // Absent by design: cuStreamGetCtx and cuOccupancyMaxActiveClusters have no
+    // ROCm equivalent, and the GL interop entry points are resolved lazily.
+    // Warp checks for a null pointer and reports it per call site.
+    *pfn = nullptr;
+    if (symbolStatus)
+        *symbolStatus = HIP_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    return hipErrorNotFound;
 }
 
 static inline void* wp_hip_dlsym(void* handle, const char* symbol)
