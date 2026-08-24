@@ -453,10 +453,30 @@ static bool capturable_tmp_alloc(void* context, const void* data, size_t size, v
     int device_ordinal = wp_cuda_context_get_device_ordinal(context);
     void* devptr = NULL;
     bool free_devptr = true;
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+// Same two-roles split as CUDA_VERSION. wp_cuda_driver_version() above is what
+// Python reads to build min_driver_version, so it must stay in CUDA's
+// major*1000 + minor*10 scheme (7020 on ROCm 7.2). But C++ call sites use the
+// same number as a feature predicate -- "wp_cuda_driver_version() >= 12040"
+// gates the capture-safe fill path, ">= 12080" the batched memcpy -- and 7020
+// fails both, disabling capabilities ROCm actually has.
+//
+// Those call sites go through this instead. The availability question on ROCm
+// is answered by the entry-point table in native/hip_util.h, so report a value
+// that passes; anything genuinely missing is null and handled per call site.
+static inline int wp_cuda_driver_feature_version()
+{
+    return WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT;
+}
+#else
+int wp_cuda_driver_version();
+static inline int wp_cuda_driver_feature_version() { return wp_cuda_driver_version(); }
+#endif
+
 
     if (capture_info) {
         // ongoing graph capture - need to stage the fill value so that it persists with the graph
-        if (CUDA_VERSION >= 12040 && wp_cuda_driver_version() >= 12040) {
+        if (CUDA_VERSION >= 12040 && wp_cuda_driver_feature_version() >= 12040) {
             // pause the capture so that the alloc/memcpy won't be captured
             void* graph = NULL;
             if (!wp_cuda_graph_pause_capture(WP_CURRENT_CONTEXT, stream, &graph))
@@ -1244,7 +1264,7 @@ bool wp_memcpy_batch(void* context, void** dsts, void** srcs, size_t* sizes, siz
     bool result = true;
 
 #if CUDA_VERSION >= 12080
-    if (wp_cuda_driver_version() >= 12080) {
+    if (wp_cuda_driver_feature_version() >= 12080) {
         CUmemcpyAttributes attr = {};
         attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
         // attr.flags = CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE;
@@ -2441,6 +2461,7 @@ int wp_cuda_driver_version()
     else
         return 0;
 }
+
 
 #if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
 // CUDA_VERSION is HIP_VERSION here, which uses a different encoding

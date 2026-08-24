@@ -65,6 +65,21 @@
 #define WP_HIP_TOOLKIT_VERSION 0
 #endif
 
+// What init_cuda_driver() in cuda_util.cpp uses in place of the reported driver
+// version on HIP. That value is consumed two ways: as a hard minimum, and as a
+// feature predicate at half a dozen "driver_version >= 12NNN" sites that decide
+// whether an entry point is resolved at all. The real ROCm number -- 7020, in
+// CUDA's scheme, because the Python runtime has to decode it -- fails every one
+// of those tests, and would silently skip resolving cuGraphAddNode and
+// cuMemcpyBatchAsync. Graph capture depends on the former.
+//
+// On ROCm the availability question is answered by the entry-point table in
+// this header, not by a version number, so report a value that passes every
+// gate. Entry points with no ROCm equivalent stay null and their call sites
+// handle that -- the same contract Warp already relies on for optional CUDA
+// entry points.
+#define WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT 12090
+
 // warp.cu returns CUDA_VERSION from wp_cuda_toolkit_version(); on HIP it
 // returns WP_HIP_TOOLKIT_VERSION instead, under a one-line guard there.
 #ifndef NVRTC_SUCCESS

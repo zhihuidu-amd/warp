@@ -221,6 +221,24 @@ bool init_cuda_driver()
     int driver_version = 0;
     if (get_driver_entry_point("cuDriverGetVersion", 2020, &(void*&)pfn_cuDriverGetVersion)
         && check_cu(pfn_cuDriverGetVersion(&driver_version))) {
+        // driver_version is used two ways below: as a hard minimum here, and as
+        // a feature predicate at half a dozen `driver_version >= 12NNN` sites
+        // that decide whether to resolve an entry point at all.
+        //
+        // On HIP it arrives as 7020 (ROCm 7.2 in CUDA's major*1000 + minor*10
+        // scheme, which the Python runtime needs to decode it). That fails the
+        // minimum, and it also silently skips resolving cuGraphAddNode and
+        // cuMemcpyBatchAsync -- both of which the entry-point table in
+        // native/hip_util.h does provide. Graph capture depends on the former.
+        //
+        // The question every one of those sites is really asking is "does this
+        // driver expose the API", and on ROCm the answer comes from the table,
+        // not from a version number. Report a version that says yes to all of
+        // them; the genuinely-absent entry points stay null and their call
+        // sites already handle that.
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+        driver_version = WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT;
+#else
         if (driver_version < WP_CUDA_DRIVER_VERSION) {
             fprintf(
                 stderr,
@@ -231,6 +249,7 @@ bool init_cuda_driver()
             );
             return false;
         }
+#endif
     } else {
         fprintf(stderr, "Warp CUDA warning: Unable to determine CUDA driver version\n");
     }
