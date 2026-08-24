@@ -96,10 +96,10 @@ inline CUDA_CALLABLE T thread_block_scan(int lane, int warp_index, int num_warps
     T orig_value = value;
 
     if constexpr (exclusive) {
-        value = scan_warp_exclusive<T, Op>(lane, value, lane == 31 ? &sums[warp_index] : nullptr);
+        value = scan_warp_exclusive<T, Op>(lane, value, lane == WP_TILE_WARP_SIZE - 1 ? &sums[warp_index] : nullptr);
     } else {
         value = scan_warp_inclusive<T, Op>(lane, value);
-        if (lane == 31)
+        if (lane == WP_TILE_WARP_SIZE - 1)
             sums[warp_index] = value;
     }
 

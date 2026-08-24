@@ -637,22 +637,33 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 
 // End bitonic sort
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int ballot_mask)
+// Takes the ballot as wp_tile_warp_mask_t, not unsigned int: __ballot_sync
+// returns 64 bits on a 64-wide wavefront, and a 32-bit parameter would discard
+// the upper half -- lanes 32-63 would contribute nothing to the scan. The mask
+// literal and the population count have to widen with it, hence
+// WP_TILE_LANES_BELOW and WP_TILE_POPC rather than a 1u shift and __popc.
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_warp_mask_t ballot_mask)
 {
-    uint32_t mask = ((1u << (lane + 1)) - 1);
-    return __popc(ballot_mask & mask);
+    // Lanes 0..lane inclusive: LANES_BELOW(lane) is exclusive, so add this lane.
+    wp_tile_warp_mask_t mask
+        = WP_TILE_LANES_BELOW(lane) | (((wp_tile_warp_mask_t)1) << (wp_tile_warp_mask_t)lane);
+    return (int)WP_TILE_POPC(ballot_mask & mask);
 }
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, unsigned int mask, bool thread_contributes_element)
+inline CUDA_CALLABLE int warp_scan_inclusive(
+    int lane, wp_tile_warp_mask_t mask, bool thread_contributes_element
+)
 {
     return warp_scan_inclusive(lane, __ballot_sync(mask, thread_contributes_element));
 }
 
 template <typename T> inline CUDA_CALLABLE T warp_scan_inclusive(int lane, T value)
 {
-// Computes an inclusive cumulative sum
+// Computes an inclusive cumulative sum.
+// The bound is the warp size, not a literal 32: a 64-wide wavefront needs one
+// more doubling step (i=32) or lanes 32-63 keep only half their contributions.
 #pragma unroll
-    for (int i = 1; i <= 32; i *= 2) {
+    for (int i = 1; i < WP_TILE_WARP_SIZE; i *= 2) {
         auto n = __shfl_up_sync(WP_TILE_FULL_WARP_MASK, value, i, WP_TILE_WARP_SIZE);
 
         if (lane >= i)
@@ -676,8 +687,14 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
     int num_bits_to_sort = 32;  // Sort all bits because that's what the bitonic fast pass does as well
 
-    const int warp_id = thread_id / 32;
-    const int lane_id = thread_id & 31;
+    // WP_TILE_WARP_SIZE, not a hardcoded 32: the callers derive num_warps as
+    // (WP_TILE_BLOCK_DIM + WP_TILE_WARP_SIZE - 1) / WP_TILE_WARP_SIZE, so on a
+    // 64-wide wavefront a 256-thread block has 4 warps while `thread_id / 32`
+    // yields warp ids up to 7. shared_mem is declared [num_warps][...], so the
+    // mismatch writes past the end of it -- silently, with no compile error and
+    // no launch failure.
+    const int warp_id = thread_id / WP_TILE_WARP_SIZE;
+    const int lane_id = thread_id & (WP_TILE_WARP_SIZE - 1);
 
     const int bits_per_pass
         = 4;  // Higher than 5 is currently not supported - 2^5=32 is the warp size and is still just fine
@@ -713,7 +730,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
                 bool contributes = digit == b;
                 int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
 
-                if (lane_id == 31)
+                if (lane_id == WP_TILE_WARP_SIZE - 1)
                     shared_mem[warp_id][b] = sum_per_warp;
             }
             __syncthreads();
@@ -721,7 +738,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
             for (int b = warp_id; b < num_warp_passes * num_warps; b += num_warps) {
                 int f = lane_id < num_warps ? shared_mem[lane_id][b] : 0;
                 f = warp_scan_inclusive(lane_id, f);
-                if (lane_id == 31)
+                if (lane_id == WP_TILE_WARP_SIZE - 1)
                     buckets[b] += f;
             }
             __syncthreads();
@@ -793,7 +810,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
             for (int b = 0; b < num_scan_buckets; b++) {
                 bool contributes = digit == b;
                 int sum_per_warp = warp_scan_inclusive(lane_id, 0xFFFFFFFF, contributes);
-                if (lane_id == 31)
+                if (lane_id == WP_TILE_WARP_SIZE - 1)
                     shared_mem[warp_id][b] = sum_per_warp;
 
                 if (contributes)
@@ -808,7 +825,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 
                 int f = lane_id < num_warps ? shared_mem[lane_id][b] : 0;
                 int inclusive_scan = warp_scan_inclusive(lane_id, f);
-                if (lane_id == 31 && warp_id == 0) {
+                if (lane_id == WP_TILE_WARP_SIZE - 1 && warp_id == 0) {
                     buckets2[b] += inclusive_scan;
                 }
 
