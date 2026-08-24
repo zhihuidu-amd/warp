@@ -252,6 +252,14 @@ bool init_cuda_driver()
 #endif
     } else {
         fprintf(stderr, "Warp CUDA warning: Unable to determine CUDA driver version\n");
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+        // Substitute here too. Warp only warns on this path and carries on, but
+        // driver_version would stay 0 and the feature gates below would then
+        // silently skip resolving cuGraphAddNode and cuMemcpyBatchAsync -- the
+        // same failure this substitution exists to prevent, reached by a
+        // different route.
+        driver_version = WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT;
+#endif
     }
 
     // initialize driver entry points
