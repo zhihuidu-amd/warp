@@ -8135,7 +8135,16 @@ class Runtime:
                 self.driver_version = None
 
             # determine minimum required driver version
-            if self.is_cuda_compatibility_enabled:
+            if self.is_hip:
+                # One ROCm installation supplies both the runtime and the
+                # driver, so the driver can never be older than the toolkit and
+                # the CUDA minimum does not apply. Without this, ROCm 7.2
+                # reports a toolkit of (7, 2), 7 > 11 is false, and the
+                # hardcoded CUDA floor of (11, 4) rejects it -- Warp then warns
+                # about an "insufficient CUDA driver version" and enumerates no
+                # GPU.
+                self.min_driver_version = self.toolkit_version
+            elif self.is_cuda_compatibility_enabled:
                 # we can rely on minor version compatibility, but 11.4 is the absolute minimum required from the driver
                 if self.toolkit_version[0] > 11:
                     self.min_driver_version = (self.toolkit_version[0], 0)

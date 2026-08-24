@@ -318,6 +318,16 @@ int cuda_init()
                 );
 #ifdef CUDA_VERSION
 #if CUDA_VERSION >= 12000
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+                // ROCm has no equivalent of CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED,
+                // so hip_util.h maps it to an invalid enum. Querying it returns
+                // hipErrorInvalidValue, and check_cu reported that as a hard
+                // error during device init ("Warp CUDA error 1: invalid
+                // argument"), which aborted enumeration and left Warp with no
+                // GPU. IPC is an optional capability; report it as unsupported
+                // rather than failing init over it.
+                g_devices[i].is_ipc_supported = 0;
+#else
                 int device_attribute_integrated = 0;
                 check_cu(cuDeviceGetAttribute_f(&device_attribute_integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device));
                 if (device_attribute_integrated == 0) {
@@ -328,6 +338,7 @@ int cuda_init()
                     // integrated devices do not support CUDA IPC
                     g_devices[i].is_ipc_supported = 0;
                 }
+#endif
 #endif
 #endif
                 check_cu(cuDeviceGetAttribute_f(
