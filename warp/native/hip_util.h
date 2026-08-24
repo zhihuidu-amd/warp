@@ -1293,6 +1293,14 @@ static inline hipError_t wp_hip_get_proc_address(
     if (!symbol || !pfn)
         return hipErrorInvalidValue;
 
+    // Taking the address of the context APIs (hipCtxCreate and friends) trips
+    // -Wdeprecated-declarations, and Warp builds with -Werror. The same
+    // suppression is already applied to the typedefs in WP_HIP_PFN: naming a
+    // function to type or address an entry point is not a use of it.
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
     static const struct {
         const char* cuda;
         void* fn;
@@ -1374,6 +1382,9 @@ static inline hipError_t wp_hip_get_proc_address(
     {"cuTexObjectCreate", reinterpret_cast<void*>(&wp_hipTexObjectCreate)},
     {"cuTexObjectDestroy", reinterpret_cast<void*>(&hipTexObjectDestroy)},
     };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
     for (const auto& e : entries) {
         if (strcmp(symbol, e.cuda) == 0) {
