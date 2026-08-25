@@ -226,6 +226,22 @@ static inline hiprtcResult wp_hiprtcCompileProgram(
     // the portable fallbacks over atomicAdd/atomicCAS, which HIP provides.
     translated.push_back("-D__CUDA_ARCH__=700");
 
+    // WP_ENABLE_HIP is what selects the 64-lane wavefront: tile_reduce.h gates
+    // WP_TILE_WARP_SIZE and WP_TILE_FULL_WARP_MASK on it, and every warp
+    // intrinsic in tile_radix_sort.h and tile_scan.h takes its mask from there.
+    //
+    // The AOT build passes it on the command line, so the tile headers were
+    // right there while every JIT-compiled kernel silently took the #else
+    // branch and used a 32-lane width with a 32-bit mask. HIP does not tolerate
+    // that truncation:
+    //
+    //     hiprtc_runtime.h:8126: static assertion failed due to requirement
+    //     'sizeof(unsigned int) == 8': The mask must be a 64-bit integer
+    //
+    // Same shape as __CUDA_ARCH__ above, one layer down: an undefined macro
+    // does not error, it selects the other branch.
+    translated.push_back("-DWP_ENABLE_HIP=1");
+
     // With __CUDACC__ defined, crt.h would pull in cuda_crt.h -- NVIDIA's
     // barebones-Clang shim -- which redefines size_t and declares NVVM PTX
     // intrinsics that do not exist on AMD. crt.h now excludes it for HIP, but

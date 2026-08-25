@@ -243,7 +243,7 @@ typedef wp_bfloat16 bfloat16;
 #endif  // WP_NO_BFLOAT16
 
 // Approximate division/reciprocal intrinsics
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
 
 inline __device__ float approx_rcp(float a)
 {
@@ -286,6 +286,33 @@ inline __device__ float16 approx_div(float16 a, float16 b)
     return float16(approx_div(float(a), float(b)));  // No approx PTX for f16; use fp32 approx div
 }
 
+#ifndef WP_NO_BFLOAT16
+inline __device__ bfloat16 approx_div(bfloat16 a, bfloat16 b) { return bfloat16(approx_div(float(a), float(b))); }
+#endif
+
+#elif defined(__HIP_DEVICE_COMPILE__)
+
+// The block above is inline PTX, which HIP cannot assemble -- `rcp.approx.f32`
+// reaches clang as an operand constraint it does not recognise:
+//
+//     error: invalid output constraint '=f' in asm
+//
+// These are approximations by contract, so map them to the AMD fast-math
+// intrinsics rather than dropping to the exact operators: __frcp_rn and
+// __fdividef are the documented HIP equivalents and keep the "approx" promise
+// the call sites rely on. Doubles have no approximate form on either platform
+// (PTX has no div.approx.f64 either), so they use rcp-then-multiply exactly as
+// the CUDA path does.
+inline __device__ float approx_rcp(float a) { return __frcp_rn(a); }
+inline __device__ double approx_rcp(double a) { return 1.0 / a; }
+inline __device__ float16 approx_rcp(float16 a) { return float16(approx_rcp(float(a))); }
+#ifndef WP_NO_BFLOAT16
+inline __device__ bfloat16 approx_rcp(bfloat16 a) { return bfloat16(approx_rcp(float(a))); }
+#endif
+
+inline __device__ float approx_div(float a, float b) { return __fdividef(a, b); }
+inline __device__ double approx_div(double a, double b) { return a * approx_rcp(b); }
+inline __device__ float16 approx_div(float16 a, float16 b) { return float16(approx_div(float(a), float(b))); }
 #ifndef WP_NO_BFLOAT16
 inline __device__ bfloat16 approx_div(bfloat16 a, bfloat16 b) { return bfloat16(approx_div(float(a), float(b))); }
 #endif
@@ -2094,7 +2121,36 @@ template <> inline CUDA_CALLABLE float16 atomic_add(float16* buf, float16 value)
     return old;
 #else  // CUDA compiled by NVRTC
 #if __CUDA_ARCH__ >= 700
-#if defined(__clang__)  // CUDA compiled by Clang
+#if defined(__HIP_DEVICE_COMPILE__)
+    // HIP is __clang__, so without this it takes the branch below and calls
+    // atomicAdd(__half*, __half) -- an overload ROCm does not provide:
+    //
+    //     error: no matching function for call to 'atomicAdd'
+    //     note: no known conversion from '__half *' to 'int *' ... (and 5 more)
+    //
+    // Emulate with a compare-and-swap on the containing 32-bit word, which
+    // needs only atomicCAS(unsigned int*), present on every HIP target. buf is
+    // 2-byte aligned, so align down and update whichever half it occupies.
+    unsigned int* word = reinterpret_cast<unsigned int*>(reinterpret_cast<size_t>(buf) & ~size_t(3));
+    const unsigned int shift = (reinterpret_cast<size_t>(buf) & 2) ? 16u : 0u;
+    unsigned int assumed;
+    unsigned int old = *word;
+    float16 previous;
+    do
+    {
+        assumed = old;
+        // Reconstruct the half in place, add, and splice the result back into
+        // the word so the OTHER half is preserved byte for byte.
+        unsigned short bits = static_cast<unsigned short>((assumed >> shift) & 0xffffu);
+        float16 current;
+        current.u = bits;
+        previous = current;
+        float16 sum = float16(float(current) + float(value));
+        unsigned int updated = (assumed & ~(0xffffu << shift)) | (static_cast<unsigned int>(sum.u) << shift);
+        old = atomicCAS(word, assumed, updated);
+    } while (assumed != old);
+    return previous;
+#elif defined(__clang__)  // CUDA compiled by Clang
     __half r = atomicAdd(reinterpret_cast<__half*>(buf), *reinterpret_cast<__half*>(&value));
     return *reinterpret_cast<float16*>(&r);
 #else  // CUDA compiled by NVRTC
