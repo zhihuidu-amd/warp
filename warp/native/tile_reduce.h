@@ -786,7 +786,20 @@ template <typename Tile, typename AdjTile> CUDA_CALLABLE void adj_tile_sum(Tile&
     T scratch = adj_reg.data[0];
 #else
     // broadcast incoming adjoint to block
-    __shared__ T scratch;
+    //
+    // Declared as raw storage rather than `__shared__ T scratch;` because T is
+    // often a type with a default constructor (wp::mat_t<1,1,double> in the FEM
+    // kernels), and HIP rejects that outright where CUDA accepts it:
+    //
+    //     error: initialization is not supported for __shared__ variables
+    //
+    // A __shared__ object cannot be constructed anyway -- there is no single
+    // thread to run the constructor -- so uninitialized bytes plus an explicit
+    // assignment by thread 0 is what the code already meant. The reference
+    // keeps the rest of the function unchanged.
+    __shared__ alignas(T) unsigned char scratch_storage[sizeof(T)];
+    T& scratch = *reinterpret_cast<T*>(scratch_storage);
+
     if (WP_TILE_THREAD_IDX == 0)
         scratch = adj_reg.data[0];
 

@@ -1037,7 +1037,14 @@ template <typename T, typename L> struct tile_register_t {
 
     // apply a lambda to all valid entries in the tile
     // Op should be a functor that takes a register index and tile_coord_t as input
-    template <typename Op> void apply(Op op)
+    //
+    // CUDA_CALLABLE: every caller (grad_add, atomic_add, grad_zero_global) is
+    // CUDA_CALLABLE, so without it this is a host function called from device
+    // code and the lambda argument is what the diagnostic names:
+    //
+    //     error: reference to __host__ function 'apply<(lambda at tile.h:1101)>'
+    //            in __host__ __device__ function
+    template <typename Op> inline CUDA_CALLABLE void apply(Op op)
     {
         WP_PRAGMA_UNROLL
         for (int i = 0; i < Layout::NumRegs; ++i) {
@@ -1117,7 +1124,14 @@ template <typename T, typename L> struct tile_register_t {
 // helper to allocate a register tile like another tile
 // users can either specify a template explicitly or
 // pass in another concrete instance
-template <typename Tile> auto tile_register_like(Tile* t = nullptr)
+// CUDA_CALLABLE, matching the explicit-shape overload below. Without it this
+// is a host function called from device code:
+//
+//     error: reference to __host__ function 'tile_register_like<...>' in
+//            __host__ __device__ function
+//
+// Reached from adj_tile_sum in tile_reduce.h, which is device-only.
+template <typename Tile> inline CUDA_CALLABLE auto tile_register_like(Tile* t = nullptr)
 {
     using T = typename Tile::Type;
     using L = typename Tile::Layout;
