@@ -366,7 +366,20 @@ inline CUDA_CALLABLE float wp_bfloat16_bits_to_float_sw(unsigned short u)
 }
 #endif  // WP_NO_BFLOAT16
 
-#if defined(__CUDA_ARCH__)
+// Excluded for HIP so the __clang__ branch below is selected instead. That
+// branch already does the right thing on AMD -- _Float16 is clang's native
+// half type and hipcc/hiprtc are clang -- so this needs no new code, only the
+// removal of a wrong claim on the branch.
+//
+// Without the exclusion, defining __CUDA_ARCH__ routed every half conversion
+// through inline PTX that HIP cannot assemble:
+//
+//     builtin.h:374: error: invalid output constraint '=h' in asm
+//     builtin.h:381: error: invalid output constraint '=f' in asm
+//
+// 292 of the 3598 errors in Warp's own test suite came from these two
+// functions alone, because half conversion is reachable from most kernels.
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
 
 CUDA_CALLABLE inline half float_to_half(float x)
 {
