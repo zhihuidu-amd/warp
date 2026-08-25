@@ -1222,7 +1222,9 @@ WP_HIP_PFN(hipCtxGetDevice, PFN_cuCtxGetDevice_v2000);
 WP_HIP_PFN(hipCtxPopCurrent, PFN_cuCtxPopCurrent_v4000);
 WP_HIP_PFN(hipCtxPushCurrent, PFN_cuCtxPushCurrent_v4000);
 WP_HIP_PFN(hipCtxSetCurrent, PFN_cuCtxSetCurrent_v4000);
-WP_HIP_PFN(hipCtxSynchronize, PFN_cuCtxSynchronize_v2000);
+// hipDeviceSynchronize, not hipCtxSynchronize: the latter returns 801
+// (hipErrorNotSupported) on gfx942. See the entry-point table below.
+WP_HIP_PFN(hipDeviceSynchronize, PFN_cuCtxSynchronize_v2000);
 WP_HIP_PFN(hipDeviceCanAccessPeer, PFN_cuDeviceCanAccessPeer_v4000);
 WP_HIP_PFN(hipDeviceGetAttribute, PFN_cuDeviceGetAttribute_v2000);
 // ROCm spells this hipGetDeviceCount, not hipDeviceGetCount.
@@ -1723,7 +1725,21 @@ static inline hipError_t wp_hip_get_proc_address(
     {"cuCtxPopCurrent", reinterpret_cast<void*>(&hipCtxPopCurrent)},
     {"cuCtxPushCurrent", reinterpret_cast<void*>(&hipCtxPushCurrent)},
     {"cuCtxSetCurrent", reinterpret_cast<void*>(&hipCtxSetCurrent)},
-    {"cuCtxSynchronize", reinterpret_cast<void*>(&hipCtxSynchronize)},
+    // NOT hipCtxSynchronize, which is the name-correct answer and the wrong one:
+    // it links, resolves, and then returns 801 (hipErrorNotSupported) on every
+    // call, so every wp.synchronize_device() failed with
+    //
+    //     Warp CUDA error 801: operation not supported
+    //     (in function wp_cuda_context_synchronize, warp.cu:2923)
+    //
+    // Measured on gfx942 / ROCm 7.2 rather than assumed: hipCtxSynchronize -> 801,
+    // hipDeviceSynchronize -> 0. This is specific to the synchronize member --
+    // hipCtxGetCurrent and hipCtxGetDevice both return 0, so the rest of the
+    // context family below is bound correctly and is left alone.
+    //
+    // The semantics match: Warp calls this to wait for all work on the current
+    // context, and HIP's current device IS that context.
+    {"cuCtxSynchronize", reinterpret_cast<void*>(&hipDeviceSynchronize)},
     {"cuDeviceCanAccessPeer", reinterpret_cast<void*>(&hipDeviceCanAccessPeer)},
     {"cuDeviceGet", reinterpret_cast<void*>(&hipDeviceGet)},
     {"cuDeviceGetAttribute", reinterpret_cast<void*>(&hipDeviceGetAttribute)},
