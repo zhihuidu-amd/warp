@@ -177,6 +177,34 @@ uint64_t wp_texture_create_device(
         return 0;
     }
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // ROCm 7.2 does not implement CUDA array allocation, which every texture
+    // needs before a texture object exists. Measured on gfx942, not inferred --
+    // a probe called array creation in four configurations and all four
+    // returned 801 (hipErrorNotSupported):
+    //
+    //     3D Depth=0 (CUDA 2D convention)  -> 801
+    //     3D Depth=1                       -> 801
+    //     hipArrayCreate 2D                -> 801
+    //     3D Depth=1 NumChannels=1         -> 801
+    //
+    // So it is not the depth convention, the 3D entry point, or the channel
+    // count: array allocation itself is absent. The entry points ARE bound in
+    // hip_util.h, which is why this surfaced as an opaque runtime error rather
+    // than a missing symbol.
+    //
+    // Fail here, with a reason. Otherwise the call proceeds and dies inside
+    // allocation, which produced 74 instances of "Failed to create CUDA
+    // texture: Warp CUDA error 801" in Warp's own test suite -- an error that
+    // reads like a bug in the caller. The device-side sampler is already
+    // handled by WP_TEXTURE_USE_HW_SAMPLER in texture.h; this is the host half.
+    wp::set_error_string(
+        "Warp error: Textures are not supported on HIP/ROCm devices: CUDA array "
+        "allocation returns hipErrorNotSupported (801) on this platform"
+    );
+    return 0;
+#else
+
     ContextGuard guard(context);
 
     size_t width = shape[0];
@@ -206,6 +234,7 @@ uint64_t wp_texture_create_device(
         return 0;
     }
     return reinterpret_cast<uint64_t>(cuda_array);
+#endif  // WP_ENABLE_HIP
 }
 
 void wp_texture_destroy_device(void* context, uint64_t array_handle, bool is_mipmapped)
