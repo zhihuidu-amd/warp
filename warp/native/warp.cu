@@ -2961,8 +2961,13 @@ uint64_t wp_cuda_context_check(void* context)
         cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
         check_cuda(cudaStreamIsCapturing(get_current_stream(), &status));
 
-        // synchronize if the stream is not capturing
-        if (status == cudaStreamCaptureStatusNone) {
+        // Synchronize if the stream is not ACTIVELY capturing. Testing for NONE
+        // alone silently skips the synchronize when a capture has been
+        // invalidated, leaving outstanding work unsynchronized with no error --
+        // the same three-state enum problem as wp_cuda_stream_is_capturing
+        // above, with the opposite symptom. Lines 3409 and 3524 already test
+        // ACTIVE; this makes the file consistent.
+        if (status != cudaStreamCaptureStatusActive) {
             check_cuda(cudaDeviceSynchronize());
             e = cudaGetLastError();
         }
@@ -3388,7 +3393,25 @@ int wp_cuda_stream_is_capturing(void* stream)
     cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
     check_cuda(cudaStreamIsCapturing(static_cast<cudaStream_t>(stream), &status));
 
-    return int(status != cudaStreamCaptureStatusNone);
+    // Test ACTIVE rather than "not NONE". The enum has a third state,
+    // Invalidated, which a capture enters when an unsafe call aborts it, and an
+    // invalidated capture is dead -- it can never be ended or replayed.
+    //
+    // Treating it as capturing makes the state permanent: Python's
+    // Device.is_capturing stays True, so wp.synchronize_device() raises
+    //
+    //     RuntimeError: Cannot synchronize device cuda:0 while graph capture is active
+    //
+    // forever after, and every later allocation and copy fails with error 901
+    // ("operation failed due to a previous error during capture"). One aborted
+    // capture in warp.tests.cuda.test_capture_mode poisoned the whole process:
+    // 3615 synchronize errors and ~1900 spurious allocation failures in a single
+    // suite run (job 67841213), including "Failed to allocate 4 bytes".
+    //
+    // Reporting an invalidated capture as not-capturing lets the runtime
+    // synchronize, discard the dead capture and carry on -- which is what the
+    // relaxed-capture tests expect, since they abort captures deliberately.
+    return int(status == cudaStreamCaptureStatusActive);
 }
 
 int wp_cuda_stream_is_blocking(void* stream)
