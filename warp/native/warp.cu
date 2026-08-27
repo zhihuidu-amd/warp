@@ -1110,6 +1110,20 @@ bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream)
 
     bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyHostToDevice, cuda_stream));
 
+    // TRACE (temporary, env-gated): this is where error 901 surfaces. Report
+    // the stream's CAPTURE STATUS at the moment of failure -- that is what
+    // distinguishes "this stream is still mid-capture from an earlier test"
+    // from "the capture ended but the error is sticky". The 901s appear inside
+    // NoGraph tests that never start a capture, so the status here decides it.
+    if (!result && getenv("WP_TRACE_CAPTURE"))
+    {
+        cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(cuda_stream, &st);
+        fprintf(stderr, "[wp_trace] h2d FAILED, stream=%p capture_status=%d "
+                        "(0=None 1=Active 2=Invalidated)\n",
+                (void*)cuda_stream, (int)st);
+    }
+
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
     return result;
@@ -3685,7 +3699,19 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         return true;
 
     // end the capture
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
+    //
+    // TRACE (temporary, env-gated): 7293165ea added clean_up() to the failure
+    // branch below and changed NOTHING -- job 67847137 reproduced the pre-fix
+    // counts byte for byte (ok=9 ERROR=7; 2373 tests, errors=2087). Either
+    // EndCapture fails and cleaning up is insufficient, or it SUCCEEDS while
+    // HIP leaves the stream invalidated, in which case the branch never runs.
+    // Those demand opposite fixes, so measure which one happens instead of
+    // inferring it from the code.
+    cudaError_t end_rc = cudaStreamEndCapture(cuda_stream, &graph);
+    if (getenv("WP_TRACE_CAPTURE"))
+        fprintf(stderr, "[wp_trace] EndCapture rc=%d (%s) stream=%p graph=%p\n",
+                (int)end_rc, cudaGetErrorString(end_rc), (void*)cuda_stream, (void*)graph);
+    if (!check_cuda(end_rc))
     {
         // clean_up() unwinds the capture bookkeeping (g_captures, the graph
         // alloc table, and the terminating EndCapture). Every other failure
