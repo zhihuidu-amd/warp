@@ -3686,7 +3686,29 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
 
     // end the capture
     if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
+    {
+        // clean_up() unwinds the capture bookkeeping (g_captures, the graph
+        // alloc table, and the terminating EndCapture). Every other failure
+        // return above calls it; this one did not, so a failed EndCapture left
+        // the device marked as capturing forever.
+        //
+        // On CUDA the path is nearly unreachable: a failed copy inside a
+        // capture leaves the capture recoverable, which is what test_async's
+        // own comment relies on --
+        //     "capture can succeed despite some errors during capture
+        //      (e.g. cudaInvalidValue during copy)"
+        // On HIP the same failed copy INVALIDATES the capture, EndCapture then
+        // fails, and without this the leak is permanent.
+        //
+        // Measured cost of the leak (job 67846710, warp.tests.cuda.test_async):
+        // 259 tests pass, then one capturing h2d copy reports ok while leaving
+        // the device dead, and only 27 of the next ~2100 pass. Everything after
+        // fails with error 901 (hipErrorStreamCaptureIsolation), plus ~1044
+        // bogus "Failed to allocate" errors from the allocator inheriting the
+        // dead context -- it fails on 4-byte requests, so not memory pressure.
+        clean_up();
         return false;
+    }
 
     // process deferred free list if no more captures are ongoing
     if (g_captures.empty()) {
