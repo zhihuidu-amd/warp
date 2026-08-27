@@ -233,7 +233,29 @@ inline CUDA_CALLABLE bool is_counter_store_target(det_ctx& ctx, const void* ptr)
 inline CUDA_CALLABLE bool is_global_store_target(const void* ptr)
 {
 #ifdef __CUDA_ARCH__
-#if defined(__clang__)
+#if defined(__HIP_DEVICE_COMPILE__)
+    // HIP is __clang__, so without this branch it takes the inline PTX below --
+    // isspacep.global has no AMD equivalent and clang rejects the constraint:
+    //     error: invalid input constraint 'l' in asm
+    //
+    // Neither CUDA spelling is available: __isGlobal is undeclared on HIP
+    // (job 67846958). __builtin_amdgcn_is_shared/is_private exist but are not
+    // callable from this signature -- they take a pointer already qualified
+    // with an address space, and three cast forms were rejected in turn:
+    //   reinterpret_cast to address_space(0)  "is not allowed"      (67846988)
+    //   the const void* passed directly        "cannot initialize"  (67847001)
+    //   const_cast to void*                    "cannot initialize"  (67847033)
+    //
+    // So return true, matching the host branch below. This function gates a
+    // deterministic-reduction fast path by asking "is a global store legal
+    // here?", and for the pointers Warp passes -- device allocations reaching
+    // wp_array_sum and friends -- the answer on AMD is yes. A wrong TRUE would
+    // permit a store that is already permitted; a wrong FALSE would silently
+    // disable determinism. The conservative direction is the one that keeps
+    // behaviour identical to the CPU path.
+    (void)ptr;
+    return true;
+#elif defined(__clang__)
     uint64_t addr = reinterpret_cast<uint64_t>(ptr);
     unsigned int result = 0;
     asm volatile("{ .reg .pred p; isspacep.global p, %1; selp.u32 %0, 1, 0, p; }" : "=r"(result) : "l"(addr));
