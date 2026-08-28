@@ -1113,20 +1113,6 @@ bool wp_memcpy_h2d(void* context, void* dest, void* src, size_t n, void* stream)
 
     bool result = check_cuda(cudaMemcpyAsync(dest, src, n, cudaMemcpyHostToDevice, cuda_stream));
 
-    // TRACE (temporary, env-gated): this is where error 901 surfaces. Report
-    // the stream's CAPTURE STATUS at the moment of failure -- that is what
-    // distinguishes "this stream is still mid-capture from an earlier test"
-    // from "the capture ended but the error is sticky". The 901s appear inside
-    // NoGraph tests that never start a capture, so the status here decides it.
-    if (!result && getenv("WP_TRACE_CAPTURE"))
-    {
-        cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
-        cudaStreamIsCapturing(cuda_stream, &st);
-        fprintf(stderr, "[wp_trace] h2d FAILED, stream=%p capture_status=%d "
-                        "(0=None 1=Active 2=Invalidated)\n",
-                (void*)cuda_stream, (int)st);
-    }
-
     end_cuda_range(WP_TIMING_MEMCPY, cuda_stream);
 
     return result;
@@ -3522,19 +3508,6 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
         return false;
     }
 
-    // TRACE (temporary, env-gated): the status the stream ALREADY has on entry.
-    // This is the measurement two failed hypotheses lacked. If a stream arrives
-    // here Invalidated, it was poisoned before this capture and the fault is
-    // upstream of graph capture entirely; if it arrives None and later fails,
-    // something inside this capture invalidates it. Those are different bugs and
-    // guessing between them has now cost two 2.5h builds.
-    if (getenv("WP_TRACE_CAPTURE")) {
-        cudaStreamCaptureStatus entry_status = cudaStreamCaptureStatusNone;
-        cudaStreamIsCapturing(cuda_stream, &entry_status);
-        fprintf(stderr, "[wp_trace] begin_capture stream=%p entry_status=%d\n",
-                (void*)cuda_stream, (int)entry_status);
-    }
-
     cudaStreamCaptureMode capture_mode;
     switch (mode) {
     case WP_CUDA_GRAPH_CAPTURE_MODE_GLOBAL:
@@ -3738,26 +3711,6 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         // dead context -- it fails on 4-byte requests, so not memory pressure.
         clean_up();
         return false;
-    }
-
-    // TRACE (temporary, env-gated). REFUTED HYPOTHESIS, kept as a warning:
-    // I read job 67851321 as "EndCapture succeeds while leaving the stream
-    // Invalidated" and added a guard here that discards such a stream. Job
-    // 67852649 shows the guard NEVER FIRES (0 occurrences of its message) and
-    // the counts are unchanged -- 2087 errors, 27 survivors, byte for byte.
-    //
-    // The two traced facts were separated in time and I collapsed them:
-    //     EndCapture rc=0, status None    <- at teardown
-    //     h2d FAILED, capture_status=2    <- later, in a DIFFERENT test
-    // The stream is clean when the capture ends and turns Invalidated somewhere
-    // after. Report the status here so that is on the record rather than
-    // inferred, and let the caller-side trace locate the actual transition.
-    //
-    if (getenv("WP_TRACE_CAPTURE")) {
-        cudaStreamCaptureStatus post_status = cudaStreamCaptureStatusNone;
-        cudaStreamIsCapturing(cuda_stream, &post_status);
-        fprintf(stderr, "[wp_trace] end_capture stream=%p post_status=%d\n",
-                (void*)cuda_stream, (int)post_status);
     }
 
     // process deferred free list if no more captures are ongoing
