@@ -569,9 +569,11 @@ def main(argv: list[str] | None = None) -> int:
             "native/mathdx.cpp",
             "native/coloring.cpp",
             "native/deterministic.cpp",
-            # Conditional graph regions for HIP. Both are self-guarded on
-            # WP_ENABLE_HIP and compile to nothing in a CUDA-only build.
-            "native/hipgraph_cond.cpp",
+            # Host-side shim for HIP conditional graph regions. Self-guarded on
+            # WP_ENABLE_HIP, so it is empty in a CUDA-only build.
+            # NOTE: hipgraph_cond itself is a DEVICE source and lives in
+            # cuda_sources below -- it defines __global__ kernels and calls
+            # hipLaunchKernelGGL, which g++ cannot compile.
             "native/hip_graph_cond.cpp",
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
@@ -586,6 +588,9 @@ def main(argv: list[str] | None = None) -> int:
             warp_cu_paths = None
         else:
             cuda_sources = [
+                # Conditional graph regions for HIP. Guarded on WP_ENABLE_HIP,
+                # so it compiles to nothing under nvcc.
+                "native/hipgraph_cond.cu",
                 "native/bvh.cu",
                 "native/deterministic.cu",
                 "native/bvh_cubql.cu",
