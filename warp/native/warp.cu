@@ -3519,6 +3519,19 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
         return false;
     }
 
+    // TRACE (temporary, env-gated): the status the stream ALREADY has on entry.
+    // This is the measurement two failed hypotheses lacked. If a stream arrives
+    // here Invalidated, it was poisoned before this capture and the fault is
+    // upstream of graph capture entirely; if it arrives None and later fails,
+    // something inside this capture invalidates it. Those are different bugs and
+    // guessing between them has now cost two 2.5h builds.
+    if (getenv("WP_TRACE_CAPTURE")) {
+        cudaStreamCaptureStatus entry_status = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(cuda_stream, &entry_status);
+        fprintf(stderr, "[wp_trace] begin_capture stream=%p entry_status=%d\n",
+                (void*)cuda_stream, (int)entry_status);
+    }
+
     cudaStreamCaptureMode capture_mode;
     switch (mode) {
     case WP_CUDA_GRAPH_CAPTURE_MODE_GLOBAL:
@@ -3724,34 +3737,24 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         return false;
     }
 
-    // EndCapture reporting success is not sufficient on HIP: it can return
-    // cudaSuccess and still leave the stream in the Invalidated capture state.
-    // Measured on gfx942 (job 67851321, WP_TRACE_CAPTURE): 4 of 4 EndCapture
-    // calls returned rc=0, and every subsequent failure saw capture_status=2
-    // (Invalidated) on the SAME stream that had just "successfully" ended.
+    // TRACE (temporary, env-gated). REFUTED HYPOTHESIS, kept as a warning:
+    // I read job 67851321 as "EndCapture succeeds while leaving the stream
+    // Invalidated" and added a guard here that discards such a stream. Job
+    // 67852649 shows the guard NEVER FIRES (0 occurrences of its message) and
+    // the counts are unchanged -- 2087 errors, 27 survivors, byte for byte.
     //
-    // Warp then treats the capture as over and hands the stream back for reuse.
-    // The next user of that stream inherits a dead one and fails with error 901
-    // (hipErrorStreamCaptureIsolation) -- including tests that never start a
-    // capture at all. In warp.tests.cuda.test_async this is a single poisoning
-    // event: 259 tests pass, then only 27 of the next ~2100.
+    // The two traced facts were separated in time and I collapsed them:
+    //     EndCapture rc=0, status None    <- at teardown
+    //     h2d FAILED, capture_status=2    <- later, in a DIFFERENT test
+    // The stream is clean when the capture ends and turns Invalidated somewhere
+    // after. Report the status here so that is on the record rather than
+    // inferred, and let the caller-side trace locate the actual transition.
     //
-    // So ask the stream directly rather than trusting the return code. A stream
-    // that is still Invalidated cannot be recovered here, but it must not be
-    // silently recycled as if it were healthy: unwind the bookkeeping and report
-    // failure, which surfaces the problem at the capture that caused it instead
-    // of at an unrelated test hundreds of cases later.
-    cudaStreamCaptureStatus post_status = cudaStreamCaptureStatusNone;
-    if (check_cuda(cudaStreamIsCapturing(cuda_stream, &post_status))
-        && post_status != cudaStreamCaptureStatusNone) {
-        wp::set_error_string(
-            "Warp error: stream is still in capture state %d after cudaStreamEndCapture reported "
-            "success. The capture was invalidated (typically by a failed operation inside it, such "
-            "as an allocation while memory pools are disabled). Discarding it.",
-            (int)post_status
-        );
-        clean_up();
-        return false;
+    if (getenv("WP_TRACE_CAPTURE")) {
+        cudaStreamCaptureStatus post_status = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(cuda_stream, &post_status);
+        fprintf(stderr, "[wp_trace] end_capture stream=%p post_status=%d\n",
+                (void*)cuda_stream, (int)post_status);
     }
 
     // process deferred free list if no more captures are ongoing
