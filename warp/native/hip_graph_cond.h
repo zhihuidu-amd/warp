@@ -40,6 +40,15 @@
 
 #include "hip_util.h"
 
+// Reserve the condition-slot pool. Idempotent and cheap after the first call.
+//
+// Call this during setup, outside any capture. hipGraphCondHandleCreate would
+// otherwise reserve lazily on first use, and that reservation allocates --
+// which is illegal inside an active capture and returns 906, poisoning it.
+// insert_while calls this defensively, but by then the parent stream is
+// already capturing, so an explicit early call is the clean path.
+bool wp_hip_graph_reserve_cond_pool(unsigned int slots);
+
 // Open a conditional (while) region on `stream` and hand Warp a graph to fill.
 //
 // `condition` is a device pointer to an int that the body updates; the region

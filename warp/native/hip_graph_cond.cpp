@@ -61,9 +61,41 @@ bool report(hipError_t err, const char* what)
 
 }  // anonymous namespace
 
+bool wp_hip_graph_reserve_cond_pool(unsigned int slots)
+{
+    // Idempotent: the library returns early once the slab exists, so repeated
+    // calls are cheap and only the first one allocates.
+    static bool reserved = false;
+    if (reserved)
+        return true;
+    hipError_t err = hipGraphCondPoolReserve(slots);
+    if (err != hipSuccess)
+        return report(err, "hipGraphCondPoolReserve");
+    reserved = true;
+    return true;
+}
+
 bool wp_hip_graph_insert_while(void* stream, int* condition, void** body_graph_ret, uint64_t* handle_ret)
 {
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+    // Reserve the condition-slot pool before ANYTHING else in this function.
+    //
+    // hipGraphCondHandleCreate reserves the pool lazily on first use, and that
+    // reservation calls hipMalloc + hipMemsetD32. Allocating while a capture is
+    // active is illegal and poisons the capture:
+    //
+    //     hipGraphCondHandleCreate failed: operation would make the legacy
+    //     stream depend on a capturing blocking stream (906)
+    //
+    // which is what job 67853883 hit on the first call. By the time Warp calls
+    // insert_while the parent stream IS capturing, so the reserve has to happen
+    // before the region is opened and, ideally, before any capture at all.
+    // Doing it here bounds the damage to one process-lifetime call; a caller
+    // that wants it fully outside a capture should call
+    // wp_hip_graph_reserve_cond_pool() during setup.
+    if (!wp_hip_graph_reserve_cond_pool(256))
+        return false;
 
     // The parent must already be capturing; the region splices into its graph.
     hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
