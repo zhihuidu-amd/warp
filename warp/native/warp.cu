@@ -3508,6 +3508,23 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
         return false;
     }
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // Reserve the conditional-region slot pool here, while nothing is
+    // capturing yet. The pool allocates on first use, and allocating during an
+    // active capture is illegal on HIP -- it returns 906 and poisons the
+    // capture. Doing it inside wp_cuda_graph_insert_while cannot work: by then
+    // the parent stream is already capturing, which is what jobs 67853883
+    // (hipGraphCondHandleCreate) and 67854737 (hipGraphCondPoolReserve) each
+    // hit in turn. This is the last point in the flow that is still outside a
+    // capture.
+    //
+    // Idempotent: only the first call allocates. Not fatal if it fails --
+    // captures that never use capture_while have no use for the pool, so a
+    // failure here should not break ordinary graph capture. insert_while
+    // reports the real error if a conditional region is actually requested.
+    wp_hip_graph_reserve_cond_pool(256);
+#endif
+
     cudaStreamCaptureMode capture_mode;
     switch (mode) {
     case WP_CUDA_GRAPH_CAPTURE_MODE_GLOBAL:
