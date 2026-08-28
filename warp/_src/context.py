@@ -12931,6 +12931,19 @@ def assert_conditional_graph_support():
     if runtime is None:
         init()
 
+    # On HIP, toolkit_version reports the ROCm version -- (7, 1) at time of
+    # writing -- so comparing it against a CUDA toolkit number rejects every
+    # capture: (7, 1) < (12, 4). The scalar is being asked to do two jobs,
+    # identify the toolkit and gate a feature, and those disagree across
+    # backends.
+    #
+    # ROCm has no conditional graph node at any version. Support here comes
+    # from hipgraph_cond (native/hipgraph_cond.cu), which emulates the same
+    # semantics with a predicated static unroll, so the gate is "is the HIP
+    # backend present", not a version comparison.
+    if runtime.is_hip:
+        return
+
     if runtime.toolkit_version is None or runtime.toolkit_version < (12, 4):
         raise RuntimeError("Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes")
 
