@@ -3699,19 +3699,7 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         return true;
 
     // end the capture
-    //
-    // TRACE (temporary, env-gated): 7293165ea added clean_up() to the failure
-    // branch below and changed NOTHING -- job 67847137 reproduced the pre-fix
-    // counts byte for byte (ok=9 ERROR=7; 2373 tests, errors=2087). Either
-    // EndCapture fails and cleaning up is insufficient, or it SUCCEEDS while
-    // HIP leaves the stream invalidated, in which case the branch never runs.
-    // Those demand opposite fixes, so measure which one happens instead of
-    // inferring it from the code.
-    cudaError_t end_rc = cudaStreamEndCapture(cuda_stream, &graph);
-    if (getenv("WP_TRACE_CAPTURE"))
-        fprintf(stderr, "[wp_trace] EndCapture rc=%d (%s) stream=%p graph=%p\n",
-                (int)end_rc, cudaGetErrorString(end_rc), (void*)cuda_stream, (void*)graph);
-    if (!check_cuda(end_rc))
+    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
     {
         // clean_up() unwinds the capture bookkeeping (g_captures, the graph
         // alloc table, and the terminating EndCapture). Every other failure
@@ -3732,6 +3720,36 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         // fails with error 901 (hipErrorStreamCaptureIsolation), plus ~1044
         // bogus "Failed to allocate" errors from the allocator inheriting the
         // dead context -- it fails on 4-byte requests, so not memory pressure.
+        clean_up();
+        return false;
+    }
+
+    // EndCapture reporting success is not sufficient on HIP: it can return
+    // cudaSuccess and still leave the stream in the Invalidated capture state.
+    // Measured on gfx942 (job 67851321, WP_TRACE_CAPTURE): 4 of 4 EndCapture
+    // calls returned rc=0, and every subsequent failure saw capture_status=2
+    // (Invalidated) on the SAME stream that had just "successfully" ended.
+    //
+    // Warp then treats the capture as over and hands the stream back for reuse.
+    // The next user of that stream inherits a dead one and fails with error 901
+    // (hipErrorStreamCaptureIsolation) -- including tests that never start a
+    // capture at all. In warp.tests.cuda.test_async this is a single poisoning
+    // event: 259 tests pass, then only 27 of the next ~2100.
+    //
+    // So ask the stream directly rather than trusting the return code. A stream
+    // that is still Invalidated cannot be recovered here, but it must not be
+    // silently recycled as if it were healthy: unwind the bookkeeping and report
+    // failure, which surfaces the problem at the capture that caused it instead
+    // of at an unrelated test hundreds of cases later.
+    cudaStreamCaptureStatus post_status = cudaStreamCaptureStatusNone;
+    if (check_cuda(cudaStreamIsCapturing(cuda_stream, &post_status))
+        && post_status != cudaStreamCaptureStatusNone) {
+        wp::set_error_string(
+            "Warp error: stream is still in capture state %d after cudaStreamEndCapture reported "
+            "success. The capture was invalidated (typically by a failed operation inside it, such "
+            "as an allocation while memory pools are disabled). Discarding it.",
+            (int)post_status
+        );
         clean_up();
         return false;
     }
