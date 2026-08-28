@@ -4207,6 +4207,11 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
 // https://developer.nvidia.com/blog/dynamic-control-flow-in-cuda-graphs-with-conditional-nodes/
 // condition is a gpu pointer
 // if_graph_ret and else_graph_ret should be NULL if not needed
+// NOTE: no HIP branch here yet, so wp.capture_if still fails on ROCm the way
+// capture_while did before this port -- get_conditional_kernel loads an
+// inline-PTX helper that does not exist. hipgraph_cond supports the if form
+// (hipGraphCondTypeIf), so wiring it is the same shape as insert_while below;
+// it is simply not done and not tested. Recorded rather than left silent.
 bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret
 )
@@ -4595,6 +4600,22 @@ bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // capture_while calls insert_while AND set_condition. Intercepting only the
+    // first left this one on the CUDA path, where it tries to load an inline-PTX
+    // helper that does not exist on ROCm:
+    //
+    //     Failed to get built-in conditional kernel
+    //
+    // and because the region was then never closed, every later capture on the
+    // stream was refused with "a conditional region is already open" -- three
+    // cascade failures from one gap (job 67855018).
+    //
+    // On HIP the condition pointer was bound at hipGraphCondBegin, so there is
+    // no handle-setting kernel to launch; this call closes the region instead.
+    return wp_hip_graph_set_condition(cuda_stream, condition, handle);
+#else
+
     // launch a kernel to set the condition handle from condition pointer
     CUfunction kernel = get_conditional_kernel(context, arch, use_ptx, "set_conditional_if_handle_kernel");
     if (!kernel) {
@@ -4610,6 +4631,7 @@ bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use
         return false;
 
     return true;
+#endif  // WP_ENABLE_HIP
 }
 
 #else
