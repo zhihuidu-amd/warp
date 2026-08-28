@@ -569,6 +569,10 @@ def main(argv: list[str] | None = None) -> int:
             "native/mathdx.cpp",
             "native/coloring.cpp",
             "native/deterministic.cpp",
+            # Conditional graph regions for HIP. Both are self-guarded on
+            # WP_ENABLE_HIP and compile to nothing in a CUDA-only build.
+            "native/hipgraph_cond.cpp",
+            "native/hip_graph_cond.cpp",
         ]
         warp_cpp_paths = [os.path.join(build_path, cpp) for cpp in cpp_sources]
 

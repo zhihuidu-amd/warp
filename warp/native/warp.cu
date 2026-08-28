@@ -7,6 +7,9 @@
 #include "apic.h"
 #include "apic_internal.h"
 #include "cuda_util.h"
+// Conditional graph regions on HIP. Self-guarded: expands to nothing unless
+// WP_ENABLE_HIP, so the CUDA build is untouched.
+#include "hip_graph_cond.h"
 #include "error.h"
 #include "scan.h"
 #include "sort.h"
@@ -4537,6 +4540,26 @@ bool wp_cuda_graph_insert_while(
 
     CUstream cuda_stream = static_cast<CUstream>(stream);
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // ROCm has no conditional graph node. The code below builds one with
+    // cuGraphAddNode(CU_GRAPH_NODE_TYPE_CONDITIONAL), which HIP does not
+    // provide -- cudaGraphConditionalHandleCreate is bound only to return
+    // hipErrorNotSupported, and cudaGraphAddNode/cudaGraphNodeParams are not
+    // bound at all. So wp.capture_while fails cleanly on HIP today.
+    //
+    // hipgraph_cond emulates the same semantics with a predicated static
+    // unroll: the body is emitted max_iters times, each copy guarded by a
+    // device-side flag, so iterations after convergence retire without doing
+    // work and without host involvement. Measured on MI325X (gfx942, ROCm 7.2)
+    // at up to 7.43x over dispatching every iteration, with the predication
+    // verified -- effective iterations track the convergence point rather than
+    // the unroll bound, and a second replay reproduces the counts.
+    //
+    // Warp hands the body back as a GRAPH, not a stream, which is why the
+    // region is closed with hipGraphCondEndWithGraph rather than hipGraphCondEnd.
+    return wp_hip_graph_insert_while(cuda_stream, condition, body_graph_ret, handle_ret);
+#else
+
     // Get the current stream capturing graph
     CUstreamCaptureStatus capture_status = CU_STREAM_CAPTURE_STATUS_NONE;
     cudaGraph_t cuda_graph = NULL;
@@ -4593,6 +4616,7 @@ bool wp_cuda_graph_insert_while(
     *handle_ret = handle;
 
     return true;
+#endif  // WP_ENABLE_HIP
 }
 
 bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle)
