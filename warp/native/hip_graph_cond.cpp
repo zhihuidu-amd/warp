@@ -34,6 +34,7 @@ namespace {
 struct PendingRegion {
     hipGraphCondHandle handle;
     hipGraph_t parent_graph;
+    hipGraph_t body_graph;  // handed to Warp; Warp captures the loop body into it
 };
 
 std::mutex g_cond_mutex;
@@ -129,12 +130,25 @@ bool wp_hip_graph_insert_while(void* stream, int* condition, void** body_graph_r
         return report(err, "hipGraphCondBegin");
     }
 
-    // Warp captures the body itself and hands the graph back at set_condition
-    // time, so the body graph pointer it receives here is the parent's -- the
-    // region is what actually carries the body. Park the state until then.
-    g_pending[hip_stream] = PendingRegion { handle, parent_graph };
+    // Hand Warp a FRESH, EMPTY graph -- never the parent.
+    //
+    // context.py does `main_graph.graph = body_graph` and redirects its own
+    // capture into whatever pointer we return here. Returning the parent meant
+    // the loop body was captured straight back into the parent graph, where it
+    // ran once inline instead of becoming a loop body. That is exactly what job
+    // 67855315 measured: the body executed once at every convergence point
+    // (stop_at 3, 5 and 8 all ran 1).
+    hipGraph_t body_graph = nullptr;
+    err = hipGraphCreate(&body_graph, 0);
+    if (err != hipSuccess) {
+        hipGraphCondAbortRegion(hip_stream);
+        hipGraphCondHandleDestroy(handle);
+        return report(err, "hipGraphCreate");
+    }
 
-    *body_graph_ret = parent_graph;
+    g_pending[hip_stream] = PendingRegion { handle, parent_graph, body_graph };
+
+    *body_graph_ret = body_graph;
     *handle_ret = reinterpret_cast<uint64_t>(handle);
     return true;
 }
@@ -161,11 +175,23 @@ bool wp_hip_graph_set_condition(void* stream, int* condition, uint64_t handle_bi
     }
 
     hipGraphCondHandle handle = it->second.handle;
+    hipGraph_t body_graph = it->second.body_graph;
     g_pending.erase(it);
 
-    hipError_t err = hipGraphCondEnd(hip_stream);
+    // EndWithGraph, NOT End. hipGraphCondEnd splices the library's own private
+    // body stream, which Warp never launches onto -- so it is empty and the
+    // region does nothing. The header says so directly: EndWithGraph "is the
+    // path Warp needs ... capture_while does not launch the body on a stream it
+    // is given -- it redirects its OWN stream into a body graph via
+    // capture_pause/capture_resume, then hands the finished graph back."
+    //
+    // The graph is cloned, not consumed, so destroying our copy afterwards is
+    // safe and avoids leaking one graph per conditional region.
+    hipError_t err = hipGraphCondEndWithGraph(hip_stream, body_graph);
     hipGraphCondHandleDestroy(handle);
-    return report(err, "hipGraphCondEnd");
+    if (body_graph)
+        hipGraphDestroy(body_graph);
+    return report(err, "hipGraphCondEndWithGraph");
 }
 
 bool wp_hip_graph_set_max_iters(void* stream, unsigned int max_iters)
