@@ -962,7 +962,34 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
         // Note: the capture id is stable across pause/resume of the same graph, so this
         // path is taken again for frees that occur after the conditional completes.
         auto capture_iter = g_captures.find(capture_id);
-        if (capture_iter != g_captures.end() && capture_id == get_capture_id(capture_iter->second->stream)) {
+
+        // HIP cannot add a memory free node to a graph that is mid-capture.
+        // hipGraphAddMemFreeNode returns 1 (hipErrorInvalidValue) whenever the target
+        // graph came from an active stream capture, while the identical call on a
+        // hand-built graph succeeds. Measured on gfx942 (probe job 67878631):
+        //
+        //   hand-built graph, free depends on alloc  -> 0 (no error)
+        //   hand-built graph, zero dependencies      -> 0 (no error)
+        //   capture graph, capture-frontier deps     -> 1 (invalid argument)
+        //   capture graph, zero dependencies         -> 1 (invalid argument)
+        //
+        // So this is not a dependency-list problem and not a missing binding: the only
+        // variable that changes the outcome is whether the graph is being captured.
+        // Left unguarded, every free during capture printed "failed to add a memory free
+        // node", erased the allocation from g_graph_allocs while the graph still owned it,
+        // and eventually killed the test worker (job 67862747, test_cuda_graph_topo_alloc_*).
+        //
+        // Fall through to the retain path below instead, which is the same treatment
+        // conditional body captures already receive: the graph keeps the allocation alive
+        // for its lifetime. Correct, at the cost of a larger graph memory footprint,
+        // because the allocation cannot be reused within the graph.
+        bool can_add_free_node = true;
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+        can_add_free_node = false;
+#endif
+
+        if (can_add_free_node && capture_iter != g_captures.end()
+            && capture_id == get_capture_id(capture_iter->second->stream)) {
             CaptureInfo* capture = capture_iter->second;
             cudaGraph_t graph = get_capture_graph(capture->stream);
             if (!graph) {
