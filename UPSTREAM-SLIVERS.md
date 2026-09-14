@@ -1,0 +1,117 @@
+# Vendor-neutral upstream candidates
+
+Running list of fixes found during the HIP port that are defensible to
+NVIDIA/warp **on CUDA merits alone**, with no HIP in the diff. This is the
+channel that already works: GH-1702 and GH-1865 both merged this way.
+
+Rule for this list: a candidate qualifies only if the bug exists in
+`upstream/main` and the fix can be explained without mentioning AMD. HIP may
+appear in the PR body as *how we found it*, never as *why it matters*.
+
+Status values: `CONFIRMED` (verified present upstream), `TO VERIFY`,
+`REJECTED` (checked, not upstreamable).
+
+---
+
+## CONFIRMED
+
+### 1. `end_capture` leaks capture state when `cudaStreamEndCapture` fails
+
+`warp/native/warp.cu`, upstream lines 3625-3626:
+
+```c
+    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
+        return false;
+```
+
+All three other failure returns in this function call `clean_up()`; this one
+does not. So a failed `cudaStreamEndCapture` permanently leaks the capture
+bookkeeping — the `g_captures` entry, the graph alloc table, and the terminating
+EndCapture — and the device stays marked as capturing for the life of the
+process.
+
+**Why it's upstreamable:** it is an internal inconsistency in Warp's own error
+handling, independent of backend. The fix is one line.
+
+**Honest framing for the PR:** on CUDA this path is hard to reach, because a
+failed copy inside a capture leaves the capture recoverable — `test_async`'s own
+comment says so ("capture can succeed despite some errors during capture"). We
+should not claim a CUDA user is hitting this today. The argument is consistency
+and blast radius: when it does fire, the process is unusable, and every sibling
+return already guards against exactly that.
+
+**Demonstration (job 67846834, HIP):** reproduced in isolation — an h2d copy
+inside a capture with the mempool disabled. The allocation inside the capture is
+illegal without memory pools and correctly fails; that part is not the bug. The
+bug is that the failed `EndCapture` then leaves the capture bookkeeping and the
+outstanding graph allocations unreferenced forever. Mempool enabled survives.
+
+**Do NOT cite job 67846710 for this.** I originally attached the `test_async`
+cascade (259 passes, then ~2100 tests failing) to this fix as its demonstration.
+Job 67852953 traced that window with `WP_TRACE_CAPTURE=1` and found
+`EndCapture calls: 0` — the streams were already invalidated before Warp's
+capture entry points ran, so this fix cannot be what fixes that cascade. The
+leak is real and reproduces on its own; the suite-wide cascade is a separate,
+still-open problem. Claiming the second as evidence for the first is exactly the
+overclaim a maintainer would catch.
+
+Fix is already in our tree at `warp/native/warp.cu:3806`, commit `7293165ea`
+("Unwind capture state when EndCapture fails").
+
+---
+
+## TO VERIFY
+
+### 3. `hipGraphAddMemFreeNode` fails during capture
+
+Currently believed to be a ROCm defect, not a Warp bug — works on a hand-built
+graph, returns 1 on a capturing one. If it turns out Warp is adding the free
+node at a point the CUDA API also disallows, the ordering fix would be
+vendor-neutral. Investigate before assuming it is purely a HIP issue.
+
+### 4. `test_cas_2d_float32` hangs on gfx942
+
+Zero CPU, not slow. Unknown whether the test or the atomic path is at fault.
+If the test has a latent race that CUDA's memory model happens to hide, the
+test fix is upstreamable.
+
+---
+
+## REJECTED
+
+### Invalidated-capture three-state tracking
+
+Checked 2026-09-14. There is no such code. `grep` for
+`CAPTURE_NONE` / `CAPTURE_INVALIDATED` / `CaptureState` / `capture_state` across
+`warp/_src` and `warp/native` returns nothing in our tree — the only hits
+anywhere are an unrelated local variable in `warp/tests/test_linear_solvers.py`.
+
+The three-state distinction was a *diagnosis* written down while chasing the
+`test_async` poison, not a change that ever landed. Nothing to upstream, and
+nothing to compare against upstream. Removed from TO VERIFY rather than left
+sitting there implying work exists.
+
+### Segmented-sort offset iterator (`sort.cu`)
+
+Checked 2026-09-14. Upstream already uses `thrust::make_counting_iterator` /
+`thrust::make_transform_iterator`, which is the CCCL-sanctioned spelling and is
+**not** broken by CCCL 3.x / CUDA 13 — only the `cub::`-namespaced iterators
+were removed there. Upstream also already has the `ValidatedSegmentOffset`
+bounds check.
+
+Our change collapses the `bool IsBegin` template parameter into a member so both
+offset iterators share one type, which hipCUB's single `OffsetIteratorT`
+requires. That is a pure ROCm accommodation with no CUDA-side justification.
+
+I initially believed this one fixed a real CUDA 13 break. It does not.
+
+### Synchronous temp allocator in `sort.cu`
+
+Behind `WP_ENABLE_HIP`; CUDA still takes `mempool_supported`. No CUDA-visible
+change by construction.
+
+### Conditional-region predication, capture-resume re-key
+
+Both measured no-ops on CUDA — generated CUDA source is byte-identical
+(job 67932933), and the two capture ids never diverge on CUDA. Nothing to
+justify upstream on its own.
