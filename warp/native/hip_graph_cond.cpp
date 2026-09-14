@@ -27,6 +27,7 @@
 
 #include <map>
 #include <mutex>
+#include <vector>
 
 namespace {
 
@@ -45,6 +46,11 @@ std::map<hipStream_t, PendingRegion> g_pending;
 // Warp has no point in between where it could set it. Park it per stream and
 // apply it at Begin.
 std::map<hipStream_t, unsigned int> g_pending_max_iters;
+
+// Body graphs whose region has been closed but which the caller may still be
+// holding. See wp_hip_graph_release_body_graphs in the header for why they
+// cannot be destroyed at close time.
+std::vector<hipGraph_t> g_retired_body_graphs;
 
 // Default when the caller never sets one. 32 is what the library uses, and it
 // is a poor default for a solver needing one iteration -- it emits 32
@@ -153,6 +159,45 @@ bool wp_hip_graph_insert_while(void* stream, int* condition, void** body_graph_r
     return true;
 }
 
+bool wp_hip_graph_get_guard(uint64_t handle_bits, void** guard_ret)
+{
+    if (!guard_ret) {
+        wp::set_error_string("Warp error: guard: null out pointer");
+        return false;
+    }
+    *guard_ret = nullptr;
+
+    hipGraphCondHandle handle = reinterpret_cast<hipGraphCondHandle>(handle_bits);
+
+    {
+        // Only hand out a guard for a region this shim currently has open.
+        // hipGraphCondSetGuard validates the handle against the library's own
+        // live set, but a handle that is live there and unknown here means the
+        // caller is binding a guard from someone else's region -- the body
+        // kernels would then test a slot no one re-arms. Refuse instead.
+        std::lock_guard<std::mutex> lock(g_cond_mutex);
+        bool known = false;
+        for (const auto& entry : g_pending) {
+            if (entry.second.handle == handle) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            wp::set_error_string("Warp error: guard: no open region for this conditional handle");
+            return false;
+        }
+    }
+
+    unsigned int* guard = nullptr;
+    hipError_t err = hipGraphCondSetGuard(handle, &guard);
+    if (err != hipSuccess)
+        return report(err, "hipGraphCondSetGuard");
+
+    *guard_ret = static_cast<void*>(guard);
+    return true;
+}
+
 bool wp_hip_graph_set_condition(void* stream, int* condition, uint64_t handle_bits)
 {
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
@@ -185,13 +230,88 @@ bool wp_hip_graph_set_condition(void* stream, int* condition, uint64_t handle_bi
     // is given -- it redirects its OWN stream into a body graph via
     // capture_pause/capture_resume, then hands the finished graph back."
     //
-    // The graph is cloned, not consumed, so destroying our copy afterwards is
-    // safe and avoids leaking one graph per conditional region.
+    // The graph is cloned, not consumed, so our copy can be freed -- but NOT
+    // here. The caller's stream is still capturing into this graph at this
+    // point (context.py::capture_while pauses the body capture only after
+    // set_condition returns), and it then hands the same pointer to
+    // wp_cuda_graph_check_conditional_body. Destroying it here made both of
+    // those reads use-after-free; on the error path the following
+    // hipStreamEndCapture dumped core. Park it instead.
     hipError_t err = hipGraphCondEndWithGraph(hip_stream, body_graph);
     hipGraphCondHandleDestroy(handle);
     if (body_graph)
-        hipGraphDestroy(body_graph);
-    return report(err, "hipGraphCondEndWithGraph");
+        g_retired_body_graphs.push_back(body_graph);
+
+    if (err != hipSuccess) {
+        // Say WHICH operation the body could not carry. The cloner replicates
+        // node params one type at a time and refuses anything it cannot
+        // reproduce -- a memory allocation, an event, a child graph -- with a
+        // bare hipErrorNotSupported that names nothing. Warp's contract
+        // promises the operation by name, and on CUDA that message comes from
+        // wp_cuda_graph_check_conditional_body one step later in
+        // context.py::capture_while; running the same checker here makes HIP
+        // report the same thing.
+        //
+        // Only on the failure path, and only after EndWithGraph, so the checker
+        // can never perturb a splice that was going to succeed. (That ordering
+        // was first tried as a FIX for test_while_capture's invalid argument
+        // (1), on the theory that walking the body while the stream still
+        // captures into it was what broke the splice. Job 67922602 refuted it:
+        // moving the checker here changed nothing, byte for byte. The real
+        // cause was in hipgraph_cond's frontier re-anchor -- see spliceBody's
+        // closing comment -- and is fixed there. Set HIPGRAPH_COND_VERBOSE=1
+        // to have the library name its own failure path; every one of them
+        // logs now, which is what made the last one findable.
+        bool named = !wp_cuda_graph_check_conditional_body(body_graph);
+        if (!named)
+            report(err, "hipGraphCondEndWithGraph");  // checker found nothing; report the raw error
+
+        // Abandon the region. EndWithGraph failed, so it did not consume it,
+        // and an open region leaves the parent capture forked -- see
+        // wp_hip_graph_abort_open_region. Ignore the abort's own status: it
+        // must not overwrite the error string we just built.
+        hipGraphCondAbortRegion(hip_stream);
+        return false;
+    }
+
+    return true;
+}
+
+void wp_hip_graph_release_body_graphs()
+{
+    std::lock_guard<std::mutex> lock(g_cond_mutex);
+    for (hipGraph_t graph : g_retired_body_graphs)
+        hipGraphDestroy(graph);
+    g_retired_body_graphs.clear();
+}
+
+bool wp_hip_graph_abort_open_region(void* stream)
+{
+    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+    std::lock_guard<std::mutex> lock(g_cond_mutex);
+
+    auto it = g_pending.find(hip_stream);
+    if (it == g_pending.end())
+        return true;  // nothing open -- the normal path, where set_condition closed it
+
+    // Getting here means capture_while raised between insert_while and
+    // set_condition: the body callback threw, or the body was a graph that
+    // wp_cuda_graph_insert_child_graph refused. Python's except restores and
+    // resumes the parent capture but cannot know a region is still open, and an
+    // open region leaves the parent's capture frontier forked, so the
+    // hipStreamEndCapture in end_capture fails and HIP keeps the stream
+    // capturing. That is a whole-process failure -- every later launch and
+    // synchronize on that stream returns 900 -- from one recoverable error.
+    hipGraphCondHandle handle = it->second.handle;
+    hipGraph_t body_graph = it->second.body_graph;
+    g_pending.erase(it);
+
+    hipError_t err = hipGraphCondAbortRegion(hip_stream);
+    hipGraphCondHandleDestroy(handle);
+    if (body_graph)
+        g_retired_body_graphs.push_back(body_graph);
+    return report(err, "hipGraphCondAbortRegion");
 }
 
 bool wp_hip_graph_set_max_iters(void* stream, unsigned int max_iters)

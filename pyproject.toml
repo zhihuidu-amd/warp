@@ -294,6 +294,12 @@ transformd = "transformd"
 [tool.typos.default.extend-identifiers]
 CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = "CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN"
 ba = "ba"
+# Vendor spellings. These are HIP/HSA API names, not our prose, and "correcting"
+# them breaks the build (or, for HSA_STATUS_*, misnames a real ROCm error code in
+# a comment). typos rewrote all three before they were listed here.
+hipMemcpy3DParms = "hipMemcpy3DParms"                                             # mirrors cudaMemcpy3DParms
+hipDeviceAttributeSharedMemPerBlockOptin = "hipDeviceAttributeSharedMemPerBlockOptin"
+HSA_STATUS_ERROR_INVALID_PACKET_FORMAT = "HSA_STATUS_ERROR_INVALID_PACKET_FORMAT"
 
 [tool.pyright]
 extraPaths = ["."]

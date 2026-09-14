@@ -2985,6 +2985,17 @@ class ModuleHasher:
         # Options that affect the binary content (like mode) must be
         # resolved in resolve_options() so the hash distinguishes them.
 
+        # HIP conditional-graph guard. codegen appends a hidden trailing parameter to
+        # every kernel on a HIP build (see codegen.py's hip_cond_guard_enabled), which
+        # changes the generated signature without changing any kernel's Python source
+        # or any option hashed above. The cache root is only scoped by Warp's version
+        # string, so without this salt a cache written by a same-version build from
+        # before the guard existed would be reused: the stale binary's kernels take one
+        # argument fewer, the extra pointer is ignored, and every unrolled copy of a
+        # capture_while body runs unpredicated again -- silently, and only on AMD.
+        if warp._src.codegen.hip_cond_guard_enabled("cuda"):
+            ch.update(b"hip_cond_guard:1")
+
         # save the module hash
         self.hash = ch.digest()
 
@@ -7846,6 +7857,12 @@ class Runtime:
             ]
             self.core.wp_cuda_graph_set_condition.restype = ctypes.c_bool
 
+            self.core.wp_cuda_graph_get_conditional_guard.argtypes = [
+                ctypes.c_uint64,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            self.core.wp_cuda_graph_get_conditional_guard.restype = ctypes.c_bool
+
             self.core.wp_cuda_graph_pause_capture.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -7869,6 +7886,12 @@ class Runtime:
 
             self.core.wp_cuda_graph_check_conditional_body.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_graph_check_conditional_body.restype = ctypes.c_bool
+
+            self.core.wp_cuda_graph_count_kernel_nodes.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint64),
+            ]
+            self.core.wp_cuda_graph_count_kernel_nodes.restype = ctypes.c_bool
 
             self.core.wp_cuda_graph_insert_memcpy.argtypes = [
                 ctypes.c_void_p,
@@ -8185,6 +8208,20 @@ class Runtime:
             self.is_hip = bool(self.core.wp_is_hip_enabled())
         except AttributeError:
             self.is_hip = False
+
+        # Stack of conditional-region guard pointers, innermost last. On HIP every
+        # generated kernel takes a hidden trailing `const unsigned int*` and returns
+        # early when the word it points at is zero (see codegen.py's guard prologue);
+        # this is what binds that pointer. A launch made outside any conditional
+        # region sees an empty stack and is given null, which the prologue's leading
+        # null test short-circuits. Empty and unused on CUDA.
+        self._cond_guards: list[int] = []
+
+        # Number of launches that have been handed a non-null guard, and the number of
+        # conditional regions opened. capture_while() snapshots both around the body so
+        # it can compare "kernels Warp launched" against the body graph's kernel nodes.
+        self._cond_launch_count: int = 0
+        self._cond_region_opens: int = 0
 
         self.toolkit_version = None  # CTK version used to build the core lib
         self.driver_version = None  # installed driver version
@@ -10735,6 +10772,127 @@ def _build_cuda_kernel_params(params: Sequence[Any]):
     return (ctypes.c_void_p * len(kernel_args))(*kernel_args)
 
 
+def _cond_guard_value() -> int | None:
+    """Device pointer to the innermost open conditional region's guard word.
+
+    ``None`` outside any region, which is what the generated prologue's leading
+    null test exists to make cheap. HIP only -- on CUDA the stack is never pushed.
+
+    Doubles as the counter of Warp launches bound inside a region, which
+    :func:`capture_while` compares against the body graph's kernel-node count to
+    find kernel nodes Warp did not generate. Every site that binds the guard
+    reaches this function, so nothing that carries a guard escapes the count.
+    It over-counts in two cases -- ``record_cmd=True`` (a :class:`Launch` built
+    but not dispatched) and a launch whose grid is empty (no node emitted) -- and
+    that is the safe direction: an over-count can only suppress the warning, never
+    invent one.
+    """
+    guards = runtime._cond_guards
+    if not guards:
+        return None
+    runtime._cond_launch_count += 1
+    return guards[-1]
+
+
+def _warn_unpredicated_library_dispatch(op: str) -> None:
+    """Warn when a :mod:`warp._src.utils` operation is called inside a HIP conditional region.
+
+    Every operation that reaches this function allocates a temporary buffer for
+    its hipCUB/rocPRIM dispatch, and a conditional body graph cannot allocate. So
+    on HIP none of them run inside a region, in one of two ways:
+
+    * ``wp.utils.radix_sort_pairs`` / ``wp.utils.segmented_sort_pairs``
+      (``sort.cu``, ``cached_side_alloc``) log ``CUDA error 900: operation not
+      permitted when stream is capturing`` and **return normally**, leaving the
+      destination unsorted. Nothing raises. This is the dangerous one.
+    * ``wp.utils.array_scan`` (``scan.cu``), ``wp.utils.array_sum`` /
+      ``wp.utils.array_inner`` (``reduce.cu``) and ``wp.utils.runlength_encode``
+      (``runlength_encode.cu``) call ``wp_alloc_device``, which becomes a graph
+      allocation node, and ``wp_cuda_graph_check_conditional_body`` raises
+      ``Conditional body graph contains an unsupported operation (memory
+      allocation)`` when the region closes.
+
+    Measured on gfx942, job 67932870: ``radix_sort_pairs`` error 900 with rc=0,
+    ``array_scan`` and ``array_inner`` both raising. ``segmented_sort_pairs`` and
+    ``runlength_encode`` were not run, and are grouped by the allocator their
+    source shares, not by measurement.
+
+    This corrects what this function used to say. It claimed these were ordinary
+    kernel nodes that "run on every unrolled copy regardless of the condition" --
+    a reasonable reading of the lowering, but wrong for these operations, because
+    the allocation stops them before a single library kernel node is emitted. The
+    claim is right in general for a native kernel that does *not* allocate, and
+    that case is real: an ``array.fill_()`` in a body puts an unguarded
+    ``memtile_value_kernel`` node in the body graph, where it does run on all
+    ``max_iters`` copies (same job, ``fill`` arm). :func:`_warn_unguarded_body_kernels`
+    is what catches that, by counting, and it needs no list of entry points.
+
+    The docstring also used to say the error-900 defect was "fixed in the native
+    library" because ``resume_capture`` re-keys the capture registry. That fix is
+    real but addresses plain pause/resume. It does not cover this path: a
+    conditional body is captured as a *child* graph, so ``capture->current_id``
+    differs from ``capture_id`` by design (``sort.cu:174``), ``acquire_temp_buffer``
+    takes ``cached_side_alloc`` anyway, and the 900 still happens.
+
+    Warn rather than refuse: the same body is correct on CUDA, and a refusal would
+    reject code that works there.
+
+    The guard stack is never pushed on CUDA and is empty on HIP outside a
+    conditional region, so the fast path is one boolean test.
+    """
+    if runtime._cond_guards:
+        log_warning(
+            f"{op}() was called inside a conditional capture region. On HIP this operation allocates a temporary "
+            "buffer and a conditional body graph cannot allocate, so it does not run: wp.utils.radix_sort_pairs() "
+            "and wp.utils.segmented_sort_pairs() log CUDA error 900 and return with the destination unchanged, "
+            "while the scan, reduction and run-length operations make the enclosing region raise when it closes. "
+            "Move the call outside the region, or use wp.capture_if()/wp.capture_while() outside of a graph "
+            "capture.",
+            once=True,
+        )
+
+
+def _warn_unguarded_body_kernels(body_graph: ctypes.c_void_p, launches: int, nested: bool) -> None:
+    """Report kernel nodes in a HIP conditional body that Warp did not generate.
+
+    :func:`_warn_unpredicated_library_dispatch` catches the library entry points
+    Warp knows about (:mod:`warp._src.utils`). This catches the general case, and
+    needs no list: every kernel Warp generates is dispatched through a path that
+    binds the guard pointer, so a body graph holding more kernel nodes than the
+    region bound guards contains at least that many kernels from somewhere else --
+    a native library, a raw driver launch, a third-party module. Those have no
+    guard parameter and run on all ``max_iters`` unrolled copies.
+
+    Skipped when a nested region opened inside the body: an inner
+    :func:`capture_while` splices its own unroll into this body graph, so the node
+    count is a multiple of the inner body and the comparison is meaningless.
+
+    Warn rather than refuse, for the same reason as the memcpy/memset case: the
+    answer is still right if the operation is idempotent or the loop runs its full
+    bound, and the same body is correct on CUDA.
+    """
+    if nested:
+        return
+
+    node_count = ctypes.c_uint64(0)
+    if not runtime.core.wp_cuda_graph_count_kernel_nodes(body_graph, ctypes.byref(node_count)):
+        # Non-fatal: this is a diagnostic, and failing it must not fail the capture.
+        log_warning(f"Could not count the conditional body's kernel nodes: {runtime.get_error_string()}", once=True)
+        return
+
+    unguarded = int(node_count.value) - launches
+    if unguarded > 0:
+        log_warning(
+            f"The body of this conditional region contains {node_count.value} kernel node(s) but Warp launched only "
+            f"{launches} guarded kernel(s), so at least {unguarded} kernel(s) came from elsewhere (a native library, "
+            "a raw driver launch, or another module). On HIP the region is a predicated static unroll and only "
+            "Warp-generated kernels honor the region's guard word, so those kernels run on every unrolled copy "
+            "regardless of the condition. The result is correct only if they are idempotent or the loop runs the "
+            "full iteration bound.",
+            once=True,
+        )
+
+
 def _raise_cuda_launch_error(kernel: Kernel, device: Device, hooks: KernelHooks, adjoint: bool) -> None:
     """Raise a RuntimeError describing a failed CUDA kernel launch.
 
@@ -10829,6 +10987,11 @@ class Launch:
                         # For primitive types in adjoint mode, initialize with 0
                         params.append(pack_arg(kernel, a.type, a.label, 0, device, True))
 
+            # Trailing conditional-guard pointer, matching what wp.launch() appends
+            # on HIP. Must be added before the address array is built.
+            if device.is_cuda and runtime.is_hip:
+                params.append(ctypes.c_void_p(_cond_guard_value()))
+
             # Create array of parameter addresses
             params_addr = _build_cuda_kernel_params(params)
 
@@ -10836,6 +10999,19 @@ class Launch:
         self.hooks = hooks
         self.params = params
         self.params_addr = params_addr
+
+        # The trailing conditional-guard slot, held as the live ctypes.c_void_p so
+        # that launch() can retarget it in place: params_addr stores its *address*,
+        # so mutating .value needs no rebuild of the address array. None on CUDA.
+        self._cond_guard_slot: ctypes.c_void_p | None = None
+        if device.is_cuda and runtime.is_hip:
+            if not params or not isinstance(params[-1], ctypes.c_void_p):
+                raise RuntimeError(
+                    f"Kernel '{kernel.key}': recorded launch is missing the trailing conditional-guard "
+                    "parameter that HIP codegen requires. Replaying it would under-supply the kernel "
+                    "signature."
+                )
+            self._cond_guard_slot = params[-1]
         self.device: Device = device
         """The device to launch on.
         This should not be changed after the launch object is created.
@@ -11097,6 +11273,13 @@ class Launch:
         else:
             if stream is None:
                 stream = self.device.stream
+
+            # Retarget the conditional guard for *this* dispatch. A recorded launch
+            # outlives the region it was created in, so the pointer baked in at record
+            # time is the wrong one: replayed inside a conditional body it must be
+            # predicated, replayed outside it must not be.
+            if self._cond_guard_slot is not None:
+                self._cond_guard_slot.value = _cond_guard_value()
 
             # If the stream is capturing, we retain the CUDA module so that it doesn't get unloaded
             # before the captured graph is released.
@@ -11455,6 +11638,24 @@ def launch(
         # tape adjoints can reduce gradient atomics in a fixed order.
         det_meta = hooks.det_launch_meta
         counter_replay_targets = getattr(det_meta, "counter_replay_targets", ())
+
+        # HIP: bind the hidden trailing conditional-guard pointer that codegen appends
+        # to every generated kernel signature. Trailing, so every params index that
+        # set_param_at_index() computes from a user-arg index is undisturbed.
+        #
+        # codegen puts the guard *after* the deterministic buffers, while those are
+        # appended downstream by launch_deterministic() rather than here -- so the two
+        # would disagree on order if they ever coexisted. They cannot: deterministic
+        # reduction is excluded from HIP builds (build_lib.py drops deterministic.cu),
+        # and this refuses rather than silently getting the order wrong if that changes.
+        if runtime.is_hip and device.is_cuda:
+            if det_meta is not None and det_meta.needs_deterministic:
+                raise RuntimeError(
+                    f"Kernel '{kernel.key}': deterministic mode is not supported on HIP. "
+                    "Warp's HIP backend is built without deterministic.cu, and the deterministic "
+                    "launch path would also conflict with the conditional-graph guard parameter."
+                )
+            params.append(ctypes.c_void_p(_cond_guard_value()))
         if adjoint and det_meta is not None and det_meta.needs_deterministic and counter_replay_targets:
             target_names = ", ".join(target.target_label for target in counter_replay_targets)
             raise RuntimeError(
@@ -13040,11 +13241,25 @@ def is_conditional_graph_supported() -> bool:
 
     Conditional graph nodes require a CUDA driver 12.4+ and Warp to be built with CUDA Toolkit 12.4+.
 
+    On HIP devices this reports the support of :func:`warp.capture_while` only. ROCm has no
+    conditional graph node at any version, so :func:`warp.capture_if` raises inside a graph
+    capture there; see :ref:`the HIP caveat in the user guide <hip_conditional_nodes>`.
+
     Returns:
-        ``True`` if both the CUDA Toolkit and driver versions are at least 12.4, ``False`` otherwise.
+        ``True`` if conditional regions can be captured on this build, ``False`` otherwise.
     """
     if runtime is None:
         init()
+
+    # HIP: toolkit_version reports the ROCm version, so the comparison below would
+    # reject every HIP build ((7, 2) < (12, 4)) even though conditional regions do
+    # work there. Support comes from hipgraph_cond (native/hipgraph_cond.cu), not
+    # from a toolkit version, so the gate is "is the HIP backend present". This
+    # must agree with assert_conditional_graph_support() above -- the two are asked
+    # the same question and a disagreement silently pushes HIP users onto the slow
+    # path.
+    if runtime.is_hip:
+        return True
 
     return (
         runtime.toolkit_version is not None
@@ -13536,6 +13751,21 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
     # ensure conditional graph nodes are supported
     assert_conditional_graph_support()
 
+    # HIP lowers a while-region as a predicated static unroll: the body graph is
+    # cloned max_iters times into the parent, and each clone's kernels return early
+    # when the region's condition word is zero (see warp/native/hipgraph_cond.h).
+    # That pointer is bound at launch time, so a body given as an already-captured
+    # Graph cannot be predicated -- its kernel nodes were recorded outside the
+    # region and carry a null guard baked into their parameter blocks, which would
+    # run the full unroll and produce a silently wrong result. Refuse instead.
+    if runtime.is_hip and isinstance(while_body, Graph):
+        raise NotImplementedError(
+            "capture_while() with a Graph body is not supported on HIP. HIP lowers a conditional "
+            "region as a predicated unroll, and a pre-captured graph's kernel nodes cannot be bound "
+            "to the region's guard, so every unrolled copy would run regardless of the condition. "
+            "Pass the body as a callable instead."
+        )
+
     # Under a CUDA APIC capture, record an APIC_OP_WHILE op alongside building the
     # live while-node (record-and-execute). The body callback runs exactly once:
     # its kernel launches are captured into the native body graph AND recorded
@@ -13569,6 +13799,23 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
     ):
         raise RuntimeError(runtime.get_error_string())
 
+    # Fetch the region's guard word. Kernels launched by the body callback bind it as
+    # their hidden trailing parameter and return early when it reads zero. The slot is
+    # seeded from `condition` before copy 0's dependencies are read, so a region whose
+    # condition is already false on entry does zero work -- true while-semantics, not
+    # just an early exit partway through the unroll.
+    cond_guard = None
+    if runtime.is_hip:
+        guard_ptr = ctypes.c_void_p()
+        if not runtime.core.wp_cuda_graph_get_conditional_guard(cond_handle, ctypes.byref(guard_ptr)):
+            raise RuntimeError(runtime.get_error_string())
+        if not guard_ptr.value:
+            raise RuntimeError(
+                "capture_while(): HIP returned a null conditional guard. Body kernels would not be "
+                "predicated and every unrolled copy would run."
+            )
+        cond_guard = guard_ptr.value
+
     # pause capturing parent graph and start capturing child graph
     main_graph = capture_pause(stream=stream, _suspend_apic_recording=False)
     # store the pointer to the cuda graph to restore it later
@@ -13582,6 +13829,14 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
     # Track whether the body sub-capture is currently live, so the except knows whether
     # it must capture_pause(stream) before restoring the parent graph and resuming it.
     body_capture_active = False
+    # Snapshot the counters so the body's guarded launches can be compared against the
+    # body graph's kernel nodes once it is captured. _cond_region_opens detects a nested
+    # region, which makes that comparison meaningless (see _warn_unguarded_body_kernels).
+    launch_mark = runtime._cond_launch_count
+    region_mark = runtime._cond_region_opens
+    if cond_guard is not None:
+        runtime._cond_region_opens += 1
+        runtime._cond_guards.append(cond_guard)
     try:
         capture_resume(main_graph, stream=stream, _resume_apic_recording=False)
         body_capture_active = True
@@ -13620,6 +13875,13 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
         # check the while-body graph
         if not runtime.core.wp_cuda_graph_check_conditional_body(body_graph):
             raise RuntimeError(runtime.get_error_string())
+
+        if cond_guard is not None:
+            _warn_unguarded_body_kernels(
+                body_graph,
+                runtime._cond_launch_count - launch_mark,
+                nested=runtime._cond_region_opens != region_mark + 1,
+            )
     except Exception:
         # Mirror capture_if: don't leak the recorded branch body on failure. If
         # the body was begun but not ended (e.g. while_body raised), end it now
@@ -13646,6 +13908,11 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
         except Exception:
             pass
         raise
+    finally:
+        # Pop on every path. A leaked guard would predicate unrelated kernels
+        # launched after this region against a slot nobody re-arms.
+        if cond_guard is not None:
+            runtime._cond_guards.pop()
 
     # restore the main graph to its original state
     main_graph.graph = main_graph_ptr

@@ -2179,8 +2179,7 @@ template <> inline CUDA_CALLABLE float16 atomic_add(float16* buf, float16 value)
     unsigned int assumed;
     unsigned int old = *word;
     float16 previous;
-    do
-    {
+    do {
         assumed = old;
         // Reconstruct the half in place, add, and splice the result back into
         // the word so the OTHER half is preserved byte for byte.

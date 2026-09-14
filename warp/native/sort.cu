@@ -12,13 +12,13 @@
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 
 #include <cassert>
+#include <cstddef>
+#include <iterator>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
 
 #include <cub/cub.cuh>
-#include <thrust/iterator/counting_iterator.h>
-#include <thrust/iterator/transform_iterator.h>
 
 // temporary buffer for radix sort
 struct TempBuffer {
@@ -165,7 +165,13 @@ static bool acquire_temp_buffer(size_t size, TempBuffer& temp_ret)
 
         // Use ephemeral graph allocations when the capture is registered
         // and is not a child graph capture (where graph allocations are not allowed).
-        bool use_graph_allocs = mempool_supported && capture && capture->id == capture_id;
+        // Compare against current_id: that is the id the capture's own stream reports
+        // right now, so it differs from capture_id exactly when a child body graph is
+        // being captured. Comparing against the begin-time id instead also fired after
+        // a pause/resume on HIP, which mints a fresh id -- a plain resumed capture was
+        // read as a child body graph, took the side-stream fallback below, and HIP
+        // refused that allocation with error 900, so the sort returned without sorting.
+        bool use_graph_allocs = mempool_supported && capture && capture->current_id == capture_id;
 
         if (use_graph_allocs) {
             // Use ephemeral graph allocs, released after use.
@@ -464,10 +470,18 @@ void wp_radix_sort_pairs_uint64_device(
     );
 }
 
-template <bool IsBegin> struct ValidatedSegmentOffset {
+// `is_begin` is a member rather than a template parameter so that the begin and
+// end offset iterators have the SAME type. CUB templates the two offset
+// iterators separately (BeginOffsetIteratorT, EndOffsetIteratorT), but hipCUB
+// declares a single OffsetIteratorT used for both, so two distinct functor types
+// make template deduction fail there ("deduced conflicting types for parameter
+// 'OffsetIteratorT'"). One type satisfies both libraries. The branch is uniform
+// across the whole iterator and the two offset loads dominate it.
+struct ValidatedSegmentOffset {
     const int* segment_start_indices;
     const int* segment_end_indices;
     int count;
+    bool is_begin;
 
     __host__ __device__ __forceinline__ int operator()(int segment_index) const
     {
@@ -475,22 +489,126 @@ template <bool IsBegin> struct ValidatedSegmentOffset {
         const int end = segment_end_indices[segment_index];
         if (start < 0 || end < start || end > count)
             return 0;
-        return IsBegin ? start : end;
+        return is_begin ? start : end;
     }
 };
+
+// Hand-rolled rather than composed from library iterators, because neither
+// library offers a spelling that works on both toolchains.
+//
+// `cub::TransformInputIterator` / `cub::CountingInputIterator` are what hipCUB
+// provides and what this started as, but CCCL 3.x -- shipped with CUDA 13 --
+// removed both from namespace `cub`, so nvcc 13.1 rejects them outright
+// ("namespace \"cub\" has no member \"CountingInputIterator\"").
+//
+// Thrust's `transform_iterator` / `counting_iterator` are the CCCL-sanctioned
+// replacement and are unusable here for the opposite reason: on ROCm, rocThrust
+// keys on __CUDACC__ (which Warp's HIP build must define for its own device
+// headers), selects its CUDA backend, and `THRUST_HOST_DEVICE` then expands to
+// nothing -- so indexing the iterator from inside rocPRIM's segmented-sort
+// kernel fails to compile.
+//
+// The offsets are computed, never stored, so `reference` is a value. That makes
+// this a read-only random-access iterator, which is all DeviceSegmentedRadixSort
+// asks of an offset iterator on either library.
+struct ValidatedOffsetIterator {
+    using self_type = ValidatedOffsetIterator;
+    using value_type = int;
+    using reference = int;
+    using pointer = const int*;
+    using difference_type = std::ptrdiff_t;
+    using iterator_category = std::random_access_iterator_tag;
+
+    ValidatedSegmentOffset op;
+    difference_type index;
+
+    ValidatedOffsetIterator() = default;
+
+    __host__ __device__ __forceinline__ explicit ValidatedOffsetIterator(
+        const ValidatedSegmentOffset& offset, difference_type start = 0
+    )
+        : op(offset)
+        , index(start)
+    {
+    }
+
+    __host__ __device__ __forceinline__ reference operator*() const { return op(static_cast<int>(index)); }
+    __host__ __device__ __forceinline__ reference operator[](difference_type n) const
+    {
+        return op(static_cast<int>(index + n));
+    }
+
+    __host__ __device__ __forceinline__ self_type operator+(difference_type n) const
+    {
+        return self_type(op, index + n);
+    }
+    __host__ __device__ __forceinline__ self_type operator-(difference_type n) const
+    {
+        return self_type(op, index - n);
+    }
+    __host__ __device__ __forceinline__ difference_type operator-(const self_type& other) const
+    {
+        return index - other.index;
+    }
+    __host__ __device__ __forceinline__ self_type& operator+=(difference_type n)
+    {
+        index += n;
+        return *this;
+    }
+    __host__ __device__ __forceinline__ self_type& operator-=(difference_type n)
+    {
+        index -= n;
+        return *this;
+    }
+    __host__ __device__ __forceinline__ self_type& operator++()
+    {
+        ++index;
+        return *this;
+    }
+    __host__ __device__ __forceinline__ self_type operator++(int)
+    {
+        self_type prev = *this;
+        ++index;
+        return prev;
+    }
+    __host__ __device__ __forceinline__ self_type& operator--()
+    {
+        --index;
+        return *this;
+    }
+    __host__ __device__ __forceinline__ self_type operator--(int)
+    {
+        self_type prev = *this;
+        --index;
+        return prev;
+    }
+
+    __host__ __device__ __forceinline__ bool operator==(const self_type& o) const { return index == o.index; }
+    __host__ __device__ __forceinline__ bool operator!=(const self_type& o) const { return index != o.index; }
+    __host__ __device__ __forceinline__ bool operator<(const self_type& o) const { return index < o.index; }
+    __host__ __device__ __forceinline__ bool operator<=(const self_type& o) const { return index <= o.index; }
+    __host__ __device__ __forceinline__ bool operator>(const self_type& o) const { return index > o.index; }
+    __host__ __device__ __forceinline__ bool operator>=(const self_type& o) const { return index >= o.index; }
+};
+
+__host__ __device__ __forceinline__ ValidatedOffsetIterator
+operator+(std::ptrdiff_t n, const ValidatedOffsetIterator& it)
+{
+    return it + n;
+}
 
 // CUB accepts iterator-defined offsets. Map each invalid pair to [0, 0) so
 // malformed device-resident metadata cannot address outside the input buffers.
 // This avoids a device-to-host copy or synchronization and remains safe during
 // CUDA graph capture.
-auto make_validated_segment_offsets(int* segment_start_indices, int* segment_end_indices, int count)
+std::pair<ValidatedOffsetIterator, ValidatedOffsetIterator>
+make_validated_segment_offsets(int* segment_start_indices, int* segment_end_indices, int count)
 {
-    auto segment_indices = thrust::make_counting_iterator(0);
-    auto begin_offsets = thrust::make_transform_iterator(
-        segment_indices, ValidatedSegmentOffset<true> { segment_start_indices, segment_end_indices, count }
+    ValidatedOffsetIterator begin_offsets(
+        ValidatedSegmentOffset { segment_start_indices, segment_end_indices, count, true }
     );
-    auto end_offsets = thrust::make_transform_iterator(
-        segment_indices, ValidatedSegmentOffset<false> { segment_start_indices, segment_end_indices, count }
+    ValidatedOffsetIterator end_offsets(
+        ValidatedSegmentOffset { segment_start_indices, segment_end_indices, count, false }
     );
     return std::make_pair(begin_offsets, end_offsets);
 }

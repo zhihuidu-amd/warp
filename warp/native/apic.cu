@@ -443,6 +443,22 @@ static bool apic_replay_ops_into_cuda_capture(
                 break;
             }
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+            // Hidden trailing conditional-guard pointer. codegen.py appends
+            // `const unsigned int* _wp_cond_guard` to every HIP kernel
+            // signature (see hip_graph_cond.h), but APIC records only the
+            // kernel's declared Warp args -- capture.py::build_launch_info
+            // walks len(kernel.adj.args) -- so replaying the recorded params
+            // alone under-supplies the signature by one. Supply null: an APIC
+            // replay is not inside a conditional region, and null means "not
+            // predicated, run normally".
+            {
+                uint8_t* guard_buf = new uint8_t[sizeof(void*)]();
+                args.push_back(guard_buf);
+                arg_storage.push_back(guard_buf);
+            }
+#endif
+
             // Replay via the same wp_cuda_launch_kernel that captured this op.
             // apic_info=nullptr is safe: g_apic_state is null during replay, so
             // the recording branch in wp_cuda_launch_kernel is a no-op.

@@ -9,8 +9,8 @@
 #include "cuda_util.h"
 // Conditional graph regions on HIP. Self-guarded: expands to nothing unless
 // WP_ENABLE_HIP, so the CUDA build is untouched.
-#include "hip_graph_cond.h"
 #include "error.h"
+#include "hip_graph_cond.h"
 #include "scan.h"
 #include "sort.h"
 
@@ -50,10 +50,7 @@
 // through this instead, because on ROCm availability is answered by the
 // entry-point table in native/hip_util.h, not by a version number; anything
 // genuinely missing resolves to null and is handled at its call site.
-static inline int wp_cuda_driver_feature_version()
-{
-    return WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT;
-}
+static inline int wp_cuda_driver_feature_version() { return WP_CUDA_DRIVER_VERSION_HIP_EQUIVALENT; }
 #else
 int wp_cuda_driver_version();
 static inline int wp_cuda_driver_feature_version() { return wp_cuda_driver_version(); }
@@ -455,12 +452,25 @@ CaptureInfo* find_capture_info(uint64_t capture_id)
     // Find the registered capture that owns the given capture id, either directly
     // (top-level capture) or as the parent of a child graph capture currently being
     // recorded. While a child body graph is captured, the parent capture's main
-    // stream also reports the child's capture id (capture ids are stable across
-    // pause/resume), which identifies the parent from any participating stream,
-    // including forked streams that carry no capture info of their own.
+    // stream also reports the child's capture id, which identifies the parent from
+    // any participating stream, including forked streams that carry no capture info
+    // of their own. Matching on both `id` and `current_id` covers the case where a
+    // pause/resume has moved the capture onto a fresh id (see CaptureInfo).
     for (const auto& capture_iter : g_captures) {
         CaptureInfo* capture = capture_iter.second;
-        if (capture && (capture->id == capture_id || get_capture_id(capture->stream) == capture_id))
+        if (capture
+            && (capture->id == capture_id || capture->current_id == capture_id
+                || get_capture_id(capture->stream) == capture_id))
+            return capture;
+    }
+    return NULL;
+}
+
+CaptureInfo* find_capture_by_canonical_id(uint64_t capture_id)
+{
+    for (const auto& capture_iter : g_captures) {
+        CaptureInfo* capture = capture_iter.second;
+        if (capture && capture->id == capture_id)
             return capture;
     }
     return NULL;
@@ -858,7 +868,12 @@ void* wp_alloc_device_async(void* context, size_t s, void* stream_, const char* 
             if (capture_iter != g_captures.end()) {
                 // remember graph allocation details
                 GraphAllocInfo alloc_info;
-                alloc_info.capture_id = capture_id;
+                // Tag with the capture's canonical (begin-time) id, not the id the stream
+                // reports now. A resume can move the registry key onto a fresh id, and the
+                // cleanup in wp_cuda_graph_end_capture() filters allocations on the
+                // canonical one -- tagging with the current id would orphan every
+                // allocation made after a pause.
+                alloc_info.capture_id = capture_iter->second->id;
                 alloc_info.context = context ? context : get_current_context();
                 alloc_info.ref_exists = true;  // user reference created and returned here
                 alloc_info.graph_destroyed = false;  // graph not destroyed yet
@@ -961,9 +976,11 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
         // capturing the body graph under a different capture id. The allocation's node and
         // dependencies live in the paused parent graph, so a free node cannot be added
         // here; fall through and let the graph retain the allocation instead.
-        // Note: the capture id is stable across pause/resume of the same graph, so this
-        // path is taken again for frees that occur after the conditional completes.
-        auto capture_iter = g_captures.find(capture_id);
+        // Note: allocations are tagged with the capture's canonical id, which does not
+        // move; the id the stream reports may, so the "still active" test below compares
+        // against current_id. Frees that occur after the conditional completes take this
+        // path again.
+        CaptureInfo* owning_capture = find_capture_by_canonical_id(capture_id);
 
         // HIP cannot add a memory free node to a graph that is mid-capture.
         // hipGraphAddMemFreeNode returns 1 (hipErrorInvalidValue) whenever the target
@@ -990,9 +1007,9 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
         can_add_free_node = false;
 #endif
 
-        if (can_add_free_node && capture_iter != g_captures.end()
-            && capture_id == get_capture_id(capture_iter->second->stream)) {
-            CaptureInfo* capture = capture_iter->second;
+        if (can_add_free_node && owning_capture
+            && owning_capture->current_id == get_capture_id(owning_capture->stream)) {
+            CaptureInfo* capture = owning_capture;
             cudaGraph_t graph = get_capture_graph(capture->stream);
             if (!graph) {
                 fprintf(stderr, "Warp warning: %s: failed to get capture graph\n", __FUNCTION__);
@@ -1046,7 +1063,9 @@ void wp_free_device_async(void* context, void* ptr, void** dbg_node_ret)
                             &other_dep_count
                         ))) {
                         // check if the other stream is part of the same capture
-                        if (other_capture_status == CU_STREAM_CAPTURE_STATUS_ACTIVE && other_capture_id == capture_id) {
+                        // (current_id, not capture_id: a resume can move the live id)
+                        if (other_capture_status == CU_STREAM_CAPTURE_STATUS_ACTIVE
+                            && other_capture_id == capture->current_id) {
                             // check if the stream's frontier includes alloc-dependent nodes
                             if (contains_any(
                                     other_capture_deps, other_capture_deps + other_dep_count, alloc_leaf_nodes.begin(),
@@ -3552,6 +3571,12 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
     // failure here should not break ordinary graph capture. insert_while
     // reports the real error if a conditional region is actually requested.
     wp_hip_graph_reserve_cond_pool(256);
+
+    // Free the body graphs left over from the previous capture. They are handed
+    // to the caller by insert_while and stay live until it stops touching them,
+    // which is after the capture that created them has ended -- so this, not
+    // set_condition, is the point where destroying them is safe.
+    wp_hip_graph_release_body_graphs();
 #endif
 
     cudaStreamCaptureMode capture_mode;
@@ -3596,6 +3621,8 @@ bool wp_cuda_graph_begin_capture(void* context, void* stream, int external, int 
     capture->stream = cuda_stream;
     capture->context = context ? static_cast<CUcontext>(context) : get_current_context();
     capture->id = capture_id;
+    capture->current_id = capture_id;
+    capture->graph = get_capture_graph(cuda_stream);
     capture->external = bool(external);
     capture->mode = capture_mode;
 
@@ -3627,6 +3654,26 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         return false;
     }
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // Close any conditional region capture_while opened and never finished.
+    //
+    // On CUDA an abandoned conditional node is just a node already in the
+    // graph, so there is nothing to unwind. The HIP emulation splices the
+    // region at set_condition instead, so an error raised before that point --
+    // a throwing body callback, or a graph body holding a memory allocation --
+    // leaves the region open and the parent capture forked. The
+    // cudaStreamEndCapture below then fails and HIP leaves the stream
+    // capturing, turning one recoverable error into a stream that returns 900
+    // for the rest of the process. Must run before that call, and only here:
+    // this is the first point where a still-open region can only mean the
+    // caller gave up on it.
+    // Warn rather than fail: end_capture is already unwinding someone else's
+    // error here, and swallowing this silently would make a failed abort
+    // indistinguishable from an abort that succeeded and did not help.
+    if (!wp_hip_graph_abort_open_region(cuda_stream))
+        fprintf(stderr, "Warp warning: %s: failed to abort an open conditional region\n", __FUNCTION__);
+#endif
+
     // clean up any capture-specific radix sort buffers
     radix_sort_end_capture(capture->id);
 
@@ -3636,8 +3683,10 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
     std::vector<FreeInfo> tmp_allocs = capture->tmp_allocs;
 
     // clear capture info
+    // Erase by the registry key, which is current_id -- a resume may have moved it off
+    // the begin-time id. Allocation bookkeeping below stays on capture_id (canonical).
     stream_info->capture = NULL;
-    g_captures.erase(capture_id);
+    g_captures.erase(capture->current_id);
     delete capture;
 
     // a lambda to clean up on exit in case of error
@@ -3734,8 +3783,7 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         return true;
 
     // end the capture
-    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph)))
-    {
+    if (!check_cuda(cudaStreamEndCapture(cuda_stream, &graph))) {
         // clean_up() unwinds the capture bookkeeping (g_captures, the graph
         // alloc table, and the terminating EndCapture). Every other failure
         // return above calls it; this one did not, so a failed EndCapture left
@@ -4229,6 +4277,36 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
         )))
         return false;
 
+    // This is a fresh BeginCapture, and the backend is free to hand back a capture id
+    // that is not the one the capture was registered under. CUDA reuses the id, so this
+    // is a no-op there. HIP mints a new one (measured on gfx942: 1 at begin, 2 after
+    // resume), and every lookup keyed on the stream's current id then misses a capture
+    // that is very much still registered. The visible symptom was a warp.utils library
+    // op issued after a resume: acquire_temp_buffer() (warp/native/sort.cu) read the
+    // miss as "this is a child body graph", fell back to allocating on a side stream
+    // under a relaxed capture mode, and HIP refused that with error 900 -- so the
+    // operation returned without doing anything and left its destination untouched,
+    // reporting only on stderr. Re-key the registry so the current id resolves.
+    //
+    // Only when this call is resuming the capture's OWN graph. capture_if()/capture_while()
+    // reach this same function to *enter* a conditional body graph: they pause the parent,
+    // repoint the paused Graph object at the body graph, and resume onto that. Those must
+    // NOT re-key -- while a body graph is being captured, the whole point is that the
+    // stream's id does not resolve to the parent, which is how wp_alloc_device_async(),
+    // wp_free_device_async() and acquire_temp_buffer() (warp/native/sort.cu) recognize a
+    // child body capture and decline to put graph allocations in it. Re-keying there made
+    // an allocation inside a conditional body look like an ordinary parent-graph
+    // allocation and crashed test_error_alloc_while_subgraph. Nested bodies are covered
+    // too: a body graph is never the top-level graph at any depth.
+    if (capture->graph && cuda_graph == capture->graph) {
+        uint64_t resumed_id = get_capture_id(cuda_stream);
+        if (resumed_id && resumed_id != capture->current_id) {
+            g_captures.erase(capture->current_id);
+            capture->current_id = resumed_id;
+            g_captures[resumed_id] = capture;
+        }
+    }
+
     return true;
 }
 
@@ -4236,11 +4314,17 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
 // https://developer.nvidia.com/blog/dynamic-control-flow-in-cuda-graphs-with-conditional-nodes/
 // condition is a gpu pointer
 // if_graph_ret and else_graph_ret should be NULL if not needed
-// NOTE: no HIP branch here yet, so wp.capture_if still fails on ROCm the way
-// capture_while did before this port -- get_conditional_kernel loads an
-// inline-PTX helper that does not exist. hipgraph_cond supports the if form
-// (hipGraphCondTypeIf), so wiring it is the same shape as insert_while below;
-// it is simply not done and not tested. Recorded rather than left silent.
+// HIP: this refuses instead of lowering. hipgraph_cond does expose the if form
+// (hipGraphCondTypeIf) and wiring it would be the same shape as insert_while
+// below, but the lowering underneath is a predicated static unroll that clones
+// the body into the parent verbatim -- hipgraph_cond.cu::cloneGraphInto copies
+// kernel node params and injects nothing, so a body only skips work if its own
+// kernels read the guard word (hipGraphCondSetGuard), which Warp bodies do not.
+// A while-body that ignores the guard costs extra iterations of an already
+// converged loop; an if/else body that ignores it EXECUTES THE BRANCH THE
+// CONDITION SELECTED AGAINST. Same mechanism, wrong answer instead of wasted
+// work, so this fails loudly rather than returning a graph that takes both
+// branches. See the HIP branch below.
 bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret
 )
@@ -4252,6 +4336,24 @@ bool wp_cuda_graph_insert_if_else(
     // if neither the IF nor ELSE branches are required, it's a no-op
     if (num_branches == 0)
         return true;
+
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    (void)arch;
+    (void)use_ptx;
+    (void)condition;
+    (void)stream;
+    (void)context;
+    wp::set_error_string(
+        "wp.capture_if() is not supported inside a graph capture on HIP/ROCm. ROCm has no conditional graph node, "
+        "and Warp's HIP fallback lowers a conditional region by unrolling the body into the parent graph "
+        "unconditionally -- the body's own kernels have to test the region's guard word for the condition to have "
+        "any effect. That is tolerable for wp.capture_while(), where ignoring the guard only costs extra iterations "
+        "of an already converged loop, but not here: it would execute the branch the condition selected against. "
+        "Outside of a graph capture, wp.capture_if() works normally on HIP -- the condition is read on the host and "
+        "the selected branch runs immediately."
+    );
+    return false;
+#else
 
     ContextGuard guard(context);
 
@@ -4382,6 +4484,7 @@ bool wp_cuda_graph_insert_if_else(
     }
 
     return true;
+#endif  // WP_ENABLE_HIP
 }
 
 // graph node type names for intelligible error reporting
@@ -4487,7 +4590,71 @@ bool wp_cuda_graph_check_conditional_body(void* body_graph)
             if (!wp_cuda_graph_check_conditional_body(child_graph))
                 return false;
         }
+
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+        // On HIP the region is a predicated static unroll, not a conditional
+        // node: every copy of the body is spliced into the parent graph and
+        // skips itself by testing a guard word. Only KERNEL nodes can do that
+        // -- codegen gives them the guard prologue. A memcpy, memset or child
+        // graph is cloned verbatim and re-executes on all max_iters copies, so
+        // the region's answer is right only if that operation is idempotent.
+        // Warn rather than refuse: idempotent is the common case (a memset of a
+        // per-iteration scratch buffer), and refusing would break bodies that
+        // are correct today.
+        if (node_type == CU_GRAPH_NODE_TYPE_MEMCPY || node_type == CU_GRAPH_NODE_TYPE_MEMSET
+            || node_type == CU_GRAPH_NODE_TYPE_GRAPH) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                fprintf(
+                    stderr,
+                    "Warp warning: %s: conditional body contains a %s node. HIP lowers a conditional region as a "
+                    "predicated unroll and only kernel nodes honor the guard, so this operation runs on every "
+                    "unrolled copy regardless of the condition. Results are correct only if it is idempotent.\n",
+                    __FUNCTION__, get_graph_node_type_name(node_type)
+                );
+            }
+        }
+#endif
     }
+
+    return true;
+}
+
+bool wp_cuda_graph_count_kernel_nodes(void* graph, uint64_t* count_ret)
+{
+    if (!graph) {
+        wp::set_error_string("Graph is null");
+        return false;
+    }
+
+    size_t num_nodes = 0;
+    if (!check_cuda(cudaGraphGetNodes((cudaGraph_t)graph, NULL, &num_nodes)))
+        return false;
+    std::vector<cudaGraphNode_t> nodes(num_nodes);
+    if (!check_cuda(cudaGraphGetNodes((cudaGraph_t)graph, nodes.data(), &num_nodes)))
+        return false;
+
+    uint64_t count = 0;
+    for (size_t i = 0; i < num_nodes; i++) {
+        // driver API, for the same reason as wp_cuda_graph_check_conditional_body
+        CUgraphNodeType node_type;
+        check_cu(cuGraphNodeGetType_f(nodes[i], &node_type));
+        if (node_type == CU_GRAPH_NODE_TYPE_KERNEL) {
+            count++;
+        } else if (node_type == CU_GRAPH_NODE_TYPE_GRAPH) {
+            cudaGraph_t child_graph = NULL;
+            if (!check_cuda(cudaGraphChildGraphNodeGetGraph(nodes[i], &child_graph)))
+                return false;
+            uint64_t child_count = 0;
+            if (!wp_cuda_graph_count_kernel_nodes(child_graph, &child_count))
+                return false;
+            count += child_count;
+        }
+    }
+
+    if (count_ret)
+        *count_ret = count;
 
     return true;
 }
@@ -4621,6 +4788,24 @@ bool wp_cuda_graph_insert_while(
 #endif  // WP_ENABLE_HIP
 }
 
+bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_ret)
+{
+    if (!guard_ret)
+        return false;
+    *guard_ret = nullptr;
+
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // HIP only. On CUDA the region is a real conditional node, so the body
+    // simply is not scheduled when the condition is false and there is nothing
+    // for a kernel to test; returning a null guard there is not a degraded
+    // path, it is the correct answer. See hip_graph_cond.h.
+    return wp_hip_graph_get_guard(handle, guard_ret);
+#else
+    (void)handle;
+    return true;
+#endif
+}
+
 bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle)
 {
     ContextGuard guard(context);
@@ -4692,6 +4877,15 @@ bool wp_cuda_graph_insert_while(
     return false;
 }
 
+bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_ret)
+{
+    // Not an error: a null guard means "not predicated", which is what a build
+    // without conditional graph nodes has anyway.
+    if (guard_ret)
+        *guard_ret = nullptr;
+    return true;
+}
+
 bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle)
 {
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
@@ -4705,6 +4899,12 @@ bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_g
 }
 
 bool wp_cuda_graph_check_conditional_body(void* body_graph)
+{
+    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
+    return false;
+}
+
+bool wp_cuda_graph_count_kernel_nodes(void* graph, uint64_t* count_ret)
 {
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
     return false;
