@@ -104,6 +104,40 @@ runtime or codegen change.
   but that is an inference from ordering, not a measured result for the other
   fifteen.
 
+## Prepared branches (not pushed)
+
+Both CONFIRMED candidates are committed on branches cut from `upstream/main`
+in a separate worktree at `C:\tmp\up-pr`, signed off, and verified to contain
+**zero** occurrences of hip/amd/rocm in the diff:
+
+| Branch | Commit | Diff |
+|---|---|---|
+| `zhihuidu/end-capture-unwind` | `df3bd97b1` | `warp.cu`, +8 |
+| `zhihuidu/skip-cas-without-its` | `cfc6e658d` | `test_atomic_cas.py`, +8 −1 |
+
+Neither is pushed. Pushing and opening PRs is outward-facing and needs
+explicit approval first.
+
+Exact upstream anchors, re-verified against `upstream/main` at `6931005e1`:
+
+- `wp_cuda_graph_end_capture` begins at `warp/native/warp.cu:3499`; the
+  `clean_up` lambda is defined at `:3532`. Of the four failure returns *after*
+  that definition, three call `clean_up()` and one — the `cudaStreamEndCapture`
+  check at `:3624` — does not. The two returns at `:3507` and `:3514` precede
+  the lambda and touch no bookkeeping, so they are correctly unguarded; the PR
+  body should say so, because a reviewer will count six returns and ask.
+- The CAS fix follows an idiom upstream already uses. `warp/tests/test_atomic.py:337`
+  reads `[d for d in devices if not d.is_cuda or d.arch >= 80]` for bfloat16.
+  Ours is the same shape with `>= 70`, which makes it a convention match rather
+  than a new pattern to argue for.
+- No changelog fragment for the CAS branch: `changelog/README.md` names
+  "test-only changes" as internal maintenance that does not need one.
+
+The upstream CAS variant **must not** contain the `device.is_hip` clause our
+tree carries. `is_hip` does not exist upstream at all (`grep -c is_hip
+warp/_src/context.py` → 0 on `upstream/main`), so that line would be a
+`AttributeError` there, not merely off-topic.
+
 ## TO VERIFY
 
 *Empty as of 2026-09-14 — every candidate raised so far has been resolved into
