@@ -156,6 +156,15 @@ rejects a 32-bit one outright:
     static assertion failed: The mask must be a 64-bit integer. Implicitly
     promoting a smaller integer is almost always an error.
 
+That assertion is not specific to `__ballot_sync`. Every mask-taking primitive in
+`hip/amd_detail/amd_warp_sync_functions.h` carries it — `__shfl_sync`,
+`__shfl_up_sync`, `__shfl_down_sync`, `__shfl_xor_sync`, `__syncwarp`, `__all_sync`,
+`__any_sync`, `__match_any_sync`, `__match_all_sync`. A narrow mask is therefore always
+a compile error on HIP and never a silent truncation, which is the useful property here:
+this class of portability defect cannot reach a running kernel. A second, runtime gate
+(`__hip_check_mask`) additionally asserts the mask *equals* the active-lane set rather
+than merely covering it, so a half-populated mask is wrong too.
+
 Making this portable means WP_TILE_WARP_SIZE becoming architecture-dependent and
 the mask type widening with it, across 44 uses in four files
 (`tile_reduce.h`, `tile_scan.h`, `tile_radix_sort.h`, `sparse.cu`). Because it
@@ -170,6 +179,16 @@ because it is the kind of thing that looks like a bug on review: the bitonic
 shuffle is bounded by *stride*, not by lane, so a block-wide caller reaches the
 "subwarp" shuffle path, and it is `stride <= 16` — not the wavefront width —
 that makes a 32-wide shuffle safe there.
+
+Upstream has since gone further in the same direction, and it is worth recording
+because it cuts against the usual assumption that a downstream backend's guard count
+only grows. The four lane-mask macros GH-1865 introduced were renamed and
+**centralized into one unguarded block in `warp/native/tile.h`**, leaving *zero*
+backend conditionals in `tile_radix_sort.h`, `tile_reduce.h`, `tile_scan.h`, and
+`sparse.cu`. Catching up to that turns what is today a scatter of per-call-site guards
+into a single `#if` in a single file. Measured against R5, merging upstream **reduces**
+the HIP delta rather than enlarging it — so the incentive runs the right way, toward
+staying current rather than deferring.
 
 **Graph capture.** ROCm supports stream capture but not conditional graph nodes.
 Warp's conditional-node paths are therefore gated on a runtime capability query, and
@@ -252,7 +271,18 @@ characterized.
 9 sizes, but the following are open and must be resolved or explicitly waived before any
 claim of suite-level health:
 
-- `test_cas_2d_float32` hangs on `gfx942` — zero CPU, not slow.
+- `test_atomic_cas.py` hangs on `gfx942` — zero CPU, not slow. **Diagnosed, and it is
+  not an AMD defect.** Every test in that module runs a GPU spinlock: one of 100
+  threads wins a CAS and the rest spin until it releases. That terminates only where
+  threads of a warp make *independent forward progress*, which CUDA guarantees from
+  Volta (`sm_70`) onward and a CDNA wavefront does not provide. The winning lane cannot
+  leave the loop until every lane does, so the lock is never released. The module is
+  registered for every device with no architecture guard, which also leaves it latently
+  broken on the `sm_52`/`sm_60`/`sm_61` targets `build_dll.py` still emits — so the fix
+  (register only for devices that provide the guarantee) is defensible on CUDA alone and
+  is prepared as its own vendor-neutral upstream PR. Note the failure mode: a **hang at
+  zero CPU**, not an assertion, which is why it stalled the serial suite rather than
+  reporting.
 - `hipGraphAddMemFreeNode` fails when the graph is capturing, though it succeeds on a
   hand-built graph. This looks like a ROCm defect and is the blocker behind the
   `test_graph` failures.
