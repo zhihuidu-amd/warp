@@ -11,12 +11,12 @@
 #include "temp_buffer.h"
 
 #include <algorithm>
-#include <type_traits>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <type_traits>
 
 #define THRUST_IGNORE_CUB_VERSION_CHECK
 

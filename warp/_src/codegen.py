@@ -6909,6 +6909,48 @@ cuda_reverse_function_template = """
 # in both module headers, so a hinted @wp.func stays valid for CPU and CUDA alike.
 _INLINE_ATTRS = {"noinline": "WP_NOINLINE ", "forceinline": "WP_FORCEINLINE "}
 
+# ---------------------------------------------------------------------------
+# HIP conditional-graph guard
+# ---------------------------------------------------------------------------
+# ROCm has no CU_GRAPH_NODE_TYPE_CONDITIONAL, so wp.capture_while() is lowered by
+# hipgraph_cond as a *predicated static unroll*: the body graph is cloned max_iters
+# times into the parent graph. Nothing predicates the clones -- the lowering is
+# cooperative, and the body's own kernels have to read the region's condition slot
+# and return early (see warp/native/hipgraph_cond.h, HIPGRAPH_COND_GUARD).
+#
+# So every generated HIP kernel takes a hidden trailing pointer and opens with a
+# one-word test. The null check comes first, so a kernel launched outside any
+# conditional region pays a register compare rather than a memory load. The load
+# is RELAXED deliberately: the AQL dispatch boundary between the condition kernel
+# and the body already carries a system-scope acquire, and an explicit acquire
+# load measured 73x slower on MI210 -- hipgraph_cond.h carries the numbers.
+#
+# The expression is spelled out rather than invoking HIPGRAPH_COND_GUARD so that
+# generated source does not depend on that header being in the include path.
+_COND_GUARD_PARAM = "const unsigned int* _wp_cond_guard"
+
+_COND_GUARD_PROLOGUE = (
+    "    // hipgraph_cond predication: skip this unrolled copy when the region's condition is false\n"
+    "    if (_wp_cond_guard && __atomic_load_n(_wp_cond_guard, __ATOMIC_RELAXED) == 0u) return;\n"
+)
+
+
+def hip_cond_guard_enabled(device):
+    """Whether generated CUDA source is destined for a HIP build.
+
+    Deliberately conservative: a CUDA build must produce byte-identical source to
+    before this feature existed, so anything uncertain -- no runtime yet, partially
+    imported context module -- answers False.
+    """
+    if device != "cuda":
+        return False
+
+    from warp._src import context as _context  # noqa: PLC0415  (circular import at module scope)
+
+    rt = getattr(_context, "runtime", None)
+    return rt is not None and bool(getattr(rt, "is_hip", False))
+
+
 # Lean (grid_stride=False) templates: 3D grid with a per-thread early return, no grid-stride loop.
 # The index flattens blockIdx.{z,y,x}; the grid shape (and its uint32 cap) is built in wp_cuda_launch_kernel.
 cuda_kernel_template_forward = """
@@ -6918,7 +6960,7 @@ cuda_kernel_template_forward = """
 {{
 {forward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
 
-{line_directive}    const size_t _idx = static_cast<size_t>(blockIdx.z * gridDim.y + blockIdx.y) * static_cast<size_t>(gridDim.x * blockDim.x) + static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
+{cond_guard_str}{line_directive}    const size_t _idx = static_cast<size_t>(blockIdx.z * gridDim.y + blockIdx.y) * static_cast<size_t>(gridDim.x * blockDim.x) + static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
 {line_directive}    if (_idx >= dim.size) return;
             // reset shared memory allocator
 {line_directive}    wp::tile_shared_storage_t::init();
@@ -6934,7 +6976,7 @@ cuda_kernel_template_backward = """
 {{
 {backward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
 
-{line_directive}    const size_t _idx = static_cast<size_t>(blockIdx.z * gridDim.y + blockIdx.y) * static_cast<size_t>(gridDim.x * blockDim.x) + static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
+{cond_guard_str}{line_directive}    const size_t _idx = static_cast<size_t>(blockIdx.z * gridDim.y + blockIdx.y) * static_cast<size_t>(gridDim.x * blockDim.x) + static_cast<size_t>(blockIdx.x * blockDim.x + threadIdx.x);
 {line_directive}    if (_idx >= dim.size) return;
             // reset shared memory allocator
 {line_directive}    wp::tile_shared_storage_t::init();
@@ -6950,7 +6992,7 @@ cuda_kernel_template_forward_grid_stride = """
 {{
 {forward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
 
-{line_directive}    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+{cond_guard_str}{line_directive}    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
 {line_directive}         _idx < dim.size;
 {line_directive}         _idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
     {{
@@ -6969,7 +7011,7 @@ cuda_kernel_template_backward_grid_stride = """
 {{
 {backward_smem_spilling_str}{line_directive}    wp::tile_shared_storage_t tile_mem;
 
-{line_directive}    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
+{cond_guard_str}{line_directive}    for (size_t _idx = static_cast<size_t>(blockDim.x) * static_cast<size_t>(blockIdx.x) + static_cast<size_t>(threadIdx.x);
 {line_directive}         _idx < dim.size;
 {line_directive}         _idx += static_cast<size_t>(blockDim.x) * static_cast<size_t>(gridDim.x))
     {{
@@ -7858,6 +7900,7 @@ def codegen_kernel(kernel, device, options):
         "backward_name": cuda_kernel_backward_name(kernel) if device == "cuda" else kernel.get_mangled_name(),
         "launch_ndim": kernel.adj.kernel_dim,
         "constant_params_alias": "",
+        "cond_guard_str": "",
     }
 
     # Generate launch_bounds string for CUDA kernels
@@ -7921,6 +7964,15 @@ def codegen_kernel(kernel, device, options):
     if not is_external_constant_params_entry and device != "cpu":
         forward_args.extend(adj.deterministic.kernel_args())
 
+    # HIP conditional-graph guard. Trailing, like the deterministic args above, so
+    # user-arg indices (and therefore set_param_at_index) are undisturbed. The
+    # external_constant_params ABI is excluded: that entry point takes no arguments
+    # at all, and its parameters arrive through __constant__ memory instead.
+    emit_cond_guard = hip_cond_guard_enabled(device) and not is_external_constant_params_entry
+    if emit_cond_guard:
+        forward_args.append(_COND_GUARD_PARAM)
+        template_fmt_args["cond_guard_str"] = _COND_GUARD_PROLOGUE
+
     forward_func_type = "function" if is_external_constant_params_entry else "kernel"
     forward_body = ""
     forward_body += adj.deterministic.kernel_locals(device)
@@ -7959,6 +8011,8 @@ def codegen_kernel(kernel, device, options):
                 else:
                     reverse_args.append(arg.ctype() + " adj_" + arg.label)
             reverse_args.extend(adj.deterministic.kernel_args())
+            if emit_cond_guard:
+                reverse_args.append(_COND_GUARD_PARAM)
 
         reverse_body = ""
         reverse_body += adj.deterministic.kernel_locals(device)

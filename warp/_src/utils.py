@@ -102,7 +102,11 @@ def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) 
     in_stride = in_array.strides[0] if in_array.ndim == 1 and not in_array.is_contiguous else dtype_size
     out_stride = out_array.strides[0] if out_array.ndim == 1 and not out_array.is_contiguous else dtype_size
 
-    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+    from warp._src.context import (  # noqa: PLC0415
+        _get_apic_capture_for_device,
+        _warn_unpredicated_library_dispatch,
+        runtime,
+    )
 
     # array_scan is recorded into the APIC byte stream on both CPU (record-only)
     # and CUDA (record-and-execute) captures. Track both arrays' base regions so
@@ -128,6 +132,7 @@ def array_scan(in_array: wp.array, out_array: wp.array, inclusive: bool = True) 
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(in_array.dtype)}")
     elif in_array.device.is_cuda:
+        _warn_unpredicated_library_dispatch("wp.utils.array_scan")
         if scalar_type == wp.int32:
             native_func = runtime.core.wp_array_scan_int_device
         elif scalar_type == wp.int64:
@@ -213,7 +218,11 @@ def radix_sort_pairs(
     if key_bit_width is not None and begin_bit == end_bit:
         return
 
-    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+    from warp._src.context import (  # noqa: PLC0415
+        _get_apic_capture_for_device,
+        _warn_unpredicated_library_dispatch,
+        runtime,
+    )
 
     # Both CPU (record-only) and CUDA (record-and-execute) APIC captures record an
     # APIC_OP_RADIX_SORT op. Track keys/values base regions first so the recorded
@@ -241,6 +250,7 @@ def radix_sort_pairs(
                 f"Unsupported keys and values data types: {type_repr(keys.dtype)}, {type_repr(values.dtype)}"
             )
     elif keys.device.is_cuda:
+        _warn_unpredicated_library_dispatch("wp.utils.radix_sort_pairs")
         if keys.dtype == wp.int32:
             runtime.core.wp_radix_sort_pairs_int_device(keys.ptr, values.ptr, count, begin_bit, end_bit, value_size)
         elif keys.dtype == wp.uint32:
@@ -356,7 +366,11 @@ def segmented_sort_pairs(
     if not values.is_contiguous:
         raise RuntimeError("segmented_sort_pairs() requires a contiguous values array")
 
-    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+    from warp._src.context import (  # noqa: PLC0415
+        _get_apic_capture_for_device,
+        _warn_unpredicated_library_dispatch,
+        runtime,
+    )
 
     if segment_start_indices.dtype != wp.int32:
         raise RuntimeError("segment_start_indices array must be of type int32")
@@ -435,6 +449,7 @@ def segmented_sort_pairs(
         if not success:
             raise ValueError(runtime.get_error_string())
     elif keys.device.is_cuda:
+        _warn_unpredicated_library_dispatch("wp.utils.segmented_sort_pairs")
         if keys.dtype == wp.int32 and values.dtype == wp.int32:
             runtime.core.wp_segmented_sort_pairs_int_device(
                 keys.ptr,
@@ -510,7 +525,11 @@ def runlength_encode(
     if run_lengths.dtype != wp.int32:
         raise RuntimeError("run_lengths array must be of type int32")
 
-    from warp._src.context import _get_apic_capture_for_device, runtime  # noqa: PLC0415
+    from warp._src.context import (  # noqa: PLC0415
+        _get_apic_capture_for_device,
+        _warn_unpredicated_library_dispatch,
+        runtime,
+    )
 
     apic_capture = _get_apic_capture_for_device(values.device)
     active_apic_capture = apic_capture is not None
@@ -554,6 +573,7 @@ def runlength_encode(
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
     elif values.device.is_cuda:
+        _warn_unpredicated_library_dispatch("wp.utils.runlength_encode")
         if values.dtype == wp.int32:
             runtime.core.wp_runlength_encode_int_device(
                 values.ptr, run_values.ptr, run_lengths.ptr, run_count.ptr, value_count
@@ -723,6 +743,7 @@ def array_sum(
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(values.dtype)}")
     elif values.device.is_cuda:
+        context._warn_unpredicated_library_dispatch("wp.utils.array_sum")
         if scalar_type == wp.float32:
             native_func = context.runtime.core.wp_array_sum_float_device
         elif scalar_type == wp.float64:
@@ -871,6 +892,7 @@ def array_inner(
         else:
             raise RuntimeError(f"Unsupported data type: {type_repr(a.dtype)}")
     elif a.device.is_cuda:
+        context._warn_unpredicated_library_dispatch("wp.utils.array_inner")
         if scalar_type == wp.float32:
             native_func = context.runtime.core.wp_array_inner_float_device
         elif scalar_type == wp.float64:

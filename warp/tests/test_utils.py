@@ -16,6 +16,58 @@ from warp._src import logger as _logger
 from warp._src.logger import log_warning
 from warp.tests.unittest_utils import *
 
+# ROCm has no conditional graph node, so the HIP backend lowers the conditional
+# capture APIs by other means and the difference is visible from here. Ask the
+# driver once.
+_HIP_BACKEND = any(d.is_hip for d in wp.get_cuda_devices())
+
+# wp.is_conditional_graph_supported() is a version probe: on CUDA it means 12.4+,
+# which also brings capture pause/resume and wp.capture_if(). On HIP it means the
+# hipgraph_cond lowering is present, which implies neither. The three flags below
+# ask about the feature each test actually uses instead of about the version.
+
+# wp.capture_if() has no lowering inside a graph capture on HIP: the static-unroll
+# fallback would run the branch the condition selected against instead of skipping
+# it, so the native layer refuses. That refusal is correct, so the test that would
+# trip it does not belong in the HIP run at all.
+CONDITIONAL_IF_SUPPORTED = wp.is_conditional_graph_supported() and not _HIP_BACKEND
+
+# wp.utils.radix_sort_pairs() cannot run inside a conditional body on HIP, because the
+# body cannot allocate its temporary buffer: acquire_temp_buffer() in warp/native/sort.cu
+# falls through to cached_side_alloc(), ROCm refuses the side-stream allocation with
+# error 900 out of wp_alloc_device_async, and the sort returns without dispatching a
+# single rocPRIM kernel -- with nothing raised. Dropping the HIP clause was measured, not
+# assumed: the test then fails with all 100000 elements mismatched.
+#
+# This is not the pause/resume capture-id bug described under CAPTURE_PAUSE_SUPPORTED
+# below. That one is fixed in the native library, and the fix does not reach here: a
+# conditional body is captured as a *child* graph, so capture->current_id differs from
+# capture_id by design (sort.cu:174) and the side-stream path is taken anyway.
+#
+# The predicated static unroll is a real limitation for native kernels in general -- a
+# body graph clone has no guard parameter to read, so an unguarded kernel node runs on
+# every copy (measured on gfx942, job 67932870, with an array.fill_() body). It is just
+# not what stops radix_sort_pairs: the allocation fails first.
+# warp._src.context._warn_unpredicated_library_dispatch() reports the gap at runtime,
+# which is what covers users who hit it outside the test suite.
+CONDITIONAL_LIBRARY_BODY_SUPPORTED = wp.is_conditional_graph_supported() and not _HIP_BACKEND
+
+# Capture pause/resume is a separate CUDA 12.4 feature that this file's gate reaches
+# through wp.is_conditional_graph_supported(). It was excluded on HIP because a *library*
+# dispatch after the resume could not get its temporary buffer: HIP mints a NEW capture id
+# on resume (measured on gfx942: 1 -> 2), so find_capture_info() missed the entry
+# g_captures held under the begin-time id, acquire_temp_buffer() in warp/native/sort.cu
+# took its side-stream fallback under cudaThreadExchangeStreamCaptureMode(Relaxed), ROCm
+# refused that with error 900, and radix_sort_pairs_device() returned without sorting --
+# leaving the destination holding its input, with nothing raised.
+#
+# Fixed in the native library: CaptureInfo carries `current_id` alongside the canonical
+# `id`, and resume_capture() re-keys g_captures so the post-resume id resolves. The re-key
+# is gated on the resumed graph being the capture's own top-level graph, because
+# capture_if()/capture_while() reach the same function to *enter* a conditional body graph
+# and must not re-key. On CUDA the two ids never diverge, so it is a no-op there.
+CAPTURE_PAUSE_SUPPORTED = wp.is_conditional_graph_supported()
+
 
 def test_array_scan(test, device):
     rng = np.random.default_rng(123)
@@ -399,8 +451,8 @@ def test_radix_sort_pairs_graph_capture_independent_graphs(test, device):
 
 def test_radix_sort_pairs_capture_while(test, device):
     """Verify sorts inside a conditional body graph, where graph allocations are not permitted."""
-    if not wp.is_conditional_graph_supported():
-        test.skipTest("Conditional graph nodes not supported")
+    if not CONDITIONAL_LIBRARY_BODY_SUPPORTED:
+        test.skipTest("Library kernels in a conditional body are not predicable on this backend")
 
     rng = np.random.default_rng(123)
     n = 100000
@@ -457,8 +509,7 @@ def test_radix_sort_pairs_graph_capture_stream_destruction(test, device):
 
 def test_radix_sort_pairs_graph_capture_pause(test, device):
     """Verify growing the scratch buffer while a capture is paused preserves the paused graph."""
-    # capture pause/resume requires CUDA 12.4+, same as conditional graph nodes
-    if not wp.is_conditional_graph_supported():
+    if not CAPTURE_PAUSE_SUPPORTED:
         test.skipTest("Graph capture pause/resume not supported")
 
     from warp._src.context import capture_pause, capture_resume  # noqa: PLC0415
@@ -500,8 +551,8 @@ def test_radix_sort_pairs_graph_capture_pause(test, device):
 
 def test_radix_sort_pairs_capture_if_forked_stream(test, device):
     """Verify conditional body sorts on the main and a forked stream do not leak scratch buffers."""
-    if not wp.is_conditional_graph_supported():
-        test.skipTest("Conditional graph nodes not supported")
+    if not CONDITIONAL_IF_SUPPORTED:
+        test.skipTest("wp.capture_if() inside a graph capture is not supported on this backend")
 
     from warp._src.context import runtime  # noqa: PLC0415
 

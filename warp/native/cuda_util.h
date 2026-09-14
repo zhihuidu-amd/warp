@@ -395,7 +395,23 @@ struct FreeInfo {
 struct CaptureInfo {
     CUstream stream = NULL;  // the main stream where capture begins and ends
     CUcontext context = NULL;  // context where capture was started
-    uint64_t id = 0;  // unique capture id from CUDA
+    uint64_t id = 0;  // capture id at begin time; the canonical id this capture's allocations are tagged with
+    // The capture id the main stream reports right now, and the key this capture is
+    // registered under in g_captures. Equal to `id` except after a pause/resume on a
+    // backend that mints a fresh capture id on resume. CUDA reuses the id, so the two
+    // never diverge there; HIP does not (measured on gfx942: 1 at begin, 2 after
+    // resume), which is why the two are tracked separately -- code asking "is this
+    // capture currently active on its own stream, or paused for a child body graph?"
+    // must compare against this, while allocation bookkeeping must stay on `id`.
+    uint64_t current_id = 0;
+    // The top-level graph this capture owns, recorded at begin time. Needed because
+    // wp_cuda_graph_resume_capture() serves two callers that look identical from the
+    // inside: resuming this capture after a pause, and *entering* a conditional body
+    // graph (warp/_src/context.py capture_if()/capture_while() point the paused Graph
+    // object at the body graph and call capture_resume on it). Only the former may move
+    // `current_id`; doing it for a body entry would register this capture under the
+    // body's id and break every "is a child body graph being captured right now?" test.
+    CUgraph graph = NULL;
     bool external = false;  // whether this is an external capture
     cudaStreamCaptureMode mode = cudaStreamCaptureModeThreadLocal;  // mode used to open the capture (for pause/resume)
     std::vector<FreeInfo> tmp_allocs;  // temporary allocations owned by the graph (e.g., staged array fill values)
@@ -414,6 +430,11 @@ StreamInfo* get_stream_info(CUstream stream);
 // recorded. Works for any stream participating in the capture, including forked
 // streams. Returns NULL for unregistered captures.
 CaptureInfo* find_capture_info(uint64_t capture_id);
+
+// Find the registered capture whose begin-time (canonical) id is the given one. Graph
+// allocations are tagged with that id, so this is the lookup to use when going from an
+// allocation back to its capture. Returns NULL for unregistered captures.
+CaptureInfo* find_capture_by_canonical_id(uint64_t capture_id);
 
 #else
 

@@ -111,7 +111,8 @@ template <typename T> inline CUDA_CALLABLE T warp_shuffle_down(T val, int offset
 
 // vector overload
 template <unsigned Length, typename T>
-inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T> val, int offset, wp_tile_warp_mask_t mask)
+inline CUDA_CALLABLE wp::vec_t<Length, T>
+warp_shuffle_down(wp::vec_t<Length, T> val, int offset, wp_tile_warp_mask_t mask)
 {
     wp::vec_t<Length, T> result;
 
@@ -122,7 +123,8 @@ inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_down(wp::vec_t<Length, T>
 }
 
 template <unsigned Length>
-inline CUDA_CALLABLE wp::vec_t<Length, half> warp_shuffle_down(wp::vec_t<Length, half> val, int offset, wp_tile_warp_mask_t mask)
+inline CUDA_CALLABLE wp::vec_t<Length, half>
+warp_shuffle_down(wp::vec_t<Length, half> val, int offset, wp_tile_warp_mask_t mask)
 {
     wp::vec_t<Length, half> result;
 
@@ -148,7 +150,8 @@ warp_shuffle_down(wp::vec_t<Length, bfloat16> val, int offset, wp_tile_warp_mask
 
 // matrix overload
 template <unsigned Rows, unsigned Cols, typename T>
-inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, wp_tile_warp_mask_t mask)
+inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T>
+warp_shuffle_down(wp::mat_t<Rows, Cols, T> val, int offset, wp_tile_warp_mask_t mask)
 {
     wp::mat_t<Rows, Cols, T> result;
 
@@ -209,7 +212,8 @@ inline CUDA_CALLABLE wp::shape_t warp_shuffle_down(wp::shape_t val, int offset, 
     return result;
 }
 
-template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::array_t<T> val, int offset, wp_tile_warp_mask_t mask)
+template <typename T>
+inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::array_t<T> val, int offset, wp_tile_warp_mask_t mask)
 {
     wp::array_t<T> result;
 
@@ -228,7 +232,8 @@ template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_down(wp::
 }
 
 template <typename T>
-inline CUDA_CALLABLE wp::indexedarray_t<T> warp_shuffle_down(wp::indexedarray_t<T> val, int offset, wp_tile_warp_mask_t mask)
+inline CUDA_CALLABLE wp::indexedarray_t<T>
+warp_shuffle_down(wp::indexedarray_t<T> val, int offset, wp_tile_warp_mask_t mask)
 {
     wp::indexedarray_t<T> result;
 

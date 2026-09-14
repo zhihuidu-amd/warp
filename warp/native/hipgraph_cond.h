@@ -94,14 +94,14 @@ typedef enum hipGraphCondLowering {
 
 /** Loop form. Mirrors CU_GRAPH_COND_TYPE_*. */
 typedef enum hipGraphCondType {
-    hipGraphCondTypeIf    = 0,  /**< run body at most once, if condition != 0 */
-    hipGraphCondTypeWhile = 1,  /**< run body while condition != 0, up to max_iters */
+    hipGraphCondTypeIf = 0, /**< run body at most once, if condition != 0 */
+    hipGraphCondTypeWhile = 1, /**< run body while condition != 0, up to max_iters */
 } hipGraphCondType;
 
 /** Default value written into the condition slot at the start of each replay. */
 typedef enum hipGraphCondAssign {
-    hipGraphCondAssignDefault = 0,  /**< default 1 == "enter the loop" */
-    hipGraphCondAssignZero    = 1,  /**< default 0 == "skip the loop" */
+    hipGraphCondAssignDefault = 0, /**< default 1 == "enter the loop" */
+    hipGraphCondAssignZero = 1, /**< default 0 == "skip the loop" */
 } hipGraphCondAssign;
 
 /* ---------------------------------------------------------------------------
@@ -121,10 +121,9 @@ typedef enum hipGraphCondAssign {
  * @param defaultValue value the slot resets to each replay
  * @param flags        reserved, pass 0
  */
-hipError_t hipGraphCondHandleCreate(hipGraphCondHandle* handle_out,
-                                    hipGraph_t graph,
-                                    hipGraphCondAssign defaultValue,
-                                    unsigned int flags);
+hipError_t hipGraphCondHandleCreate(
+    hipGraphCondHandle* handle_out, hipGraph_t graph, hipGraphCondAssign defaultValue, unsigned int flags
+);
 
 /**
  * Release a handle. Safe on NULL.
@@ -231,8 +230,7 @@ hipError_t hipGraphCondPoolReserve(unsigned int slots);
  * hipGraphCondHandleCreate returns hipErrorOutOfMemory, which is what makes it
  * usable as a pre-capture check.
  */
-hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out,
-                                  unsigned int* used_out);
+hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out, unsigned int* used_out);
 
 /**
  * Device address of the condition slot.
@@ -242,8 +240,7 @@ hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out,
  * calling cudaGraphSetConditional() inside device code. Write 0 to stop the
  * loop, non-zero to continue. Use a release-ordered store.
  */
-hipError_t hipGraphCondHandleGetDevicePtr(hipGraphCondHandle handle,
-                                          unsigned int** ptr_out);
+hipError_t hipGraphCondHandleGetDevicePtr(hipGraphCondHandle handle, unsigned int** ptr_out);
 
 /* ---------------------------------------------------------------------------
  * Building a conditional region during stream capture
@@ -278,11 +275,9 @@ hipError_t hipGraphCondHandleGetDevicePtr(hipGraphCondHandle handle,
  * @return hipErrorIllegalState if @p stream is not capturing,
  *         hipErrorInvalidValue on bad arguments.
  */
-hipError_t hipGraphCondBegin(hipStream_t stream,
-                             hipGraphCondHandle handle,
-                             hipGraphCondType type,
-                             const int* condition,
-                             unsigned int max_iters);
+hipError_t hipGraphCondBegin(
+    hipStream_t stream, hipGraphCondHandle handle, hipGraphCondType type, const int* condition, unsigned int max_iters
+);
 
 /**
  * Stream the loop body must be launched on, between Begin and End.
@@ -336,9 +331,7 @@ hipError_t hipGraphCondSetMaxIters(hipStream_t stream, unsigned int max_iters);
  * hipGraphCondBegin/End insert these for you; call it directly only when you
  * want the condition refreshed at a specific point inside the body.
  */
-hipError_t hipGraphCondSetCondition(hipStream_t stream,
-                                    hipGraphCondHandle handle,
-                                    const int* condition);
+hipError_t hipGraphCondSetCondition(hipStream_t stream, hipGraphCondHandle handle, const int* condition);
 
 /* ---------------------------------------------------------------------------
  * Predication support
@@ -359,8 +352,7 @@ hipError_t hipGraphCondSetCondition(hipStream_t stream,
  *
  * @param guard_out receives the device pointer to pass to body kernels
  */
-hipError_t hipGraphCondSetGuard(hipGraphCondHandle handle,
-                                unsigned int** guard_out);
+hipError_t hipGraphCondSetGuard(hipGraphCondHandle handle, unsigned int** guard_out);
 
 /**
  * The guard prologue. Put this as the first statement of every body kernel.
@@ -446,9 +438,9 @@ const char* hipGraphCondGetLoweringDescription(void);
 hipError_t hipGraphCondGetLastUnrollCount(unsigned int* count_out);
 
 #ifdef __cplusplus
-}  /* extern "C" */
+} /* extern "C" */
 #endif
 
-#endif  /* WP_ENABLE_HIP */
+#endif /* WP_ENABLE_HIP */
 
-#endif  /* HIPGRAPH_COND_H */
+#endif /* HIPGRAPH_COND_H */

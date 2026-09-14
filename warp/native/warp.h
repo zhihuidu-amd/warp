@@ -780,10 +780,21 @@ WP_API bool wp_cuda_graph_insert_while(
 );
 WP_API bool
 wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle);
+// Device guard word for a conditional region opened by wp_cuda_graph_insert_while.
+// HIP only: on HIP the region is a predicated static unroll and body kernels must
+// test this word to skip themselves (see hip_graph_cond.h). Returns a null guard on
+// CUDA, where a conditional node makes the test unnecessary. Must be called while
+// the handle is live, i.e. before wp_cuda_graph_set_condition.
+WP_API bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_ret);
 WP_API bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret);
 WP_API bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph);
 WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_graph);
 WP_API bool wp_cuda_graph_check_conditional_body(void* body_graph);
+// Count the kernel nodes in a graph, recursing into child graphs. HIP only in
+// practice: the predicated unroll can only skip a kernel node whose source Warp
+// generated, so comparing this against the number of Warp launches recorded in
+// the body is what detects a library kernel (e.g. hipCUB) that carries no guard.
+WP_API bool wp_cuda_graph_count_kernel_nodes(void* graph, uint64_t* count_ret);
 
 WP_API void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t size, int kind);
 WP_API bool wp_cuda_graph_insert_memcpy_batch(

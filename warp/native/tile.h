@@ -263,8 +263,7 @@ template <int N> struct tile_coord_t {
 };
 
 // This function deduces N = sizeof...(Ints)
-template <typename... Ints>
-constexpr CUDA_CALLABLE tile_coord_t<sizeof...(Ints)> tile_coord(Ints... idxs)
+template <typename... Ints> constexpr CUDA_CALLABLE tile_coord_t<sizeof...(Ints)> tile_coord(Ints... idxs)
 {
     constexpr int N = sizeof...(Ints);
 

@@ -1842,6 +1842,76 @@ condition value as a counter:
 .. note::
     :func:`wp.capture_if <warp.capture_if>` and :func:`wp.capture_while <warp.capture_while>` will work even without graph capture on any device. If there is no active capture, the condition will be evaluated on the CPU and the correct branch will be executed immediately. This makes it possible to write code that works similarly with and without graph capture.
 
+.. _hip_conditional_nodes:
+
+.. warning::
+    **HIP/ROCm has no conditional graph node.** Inside an active graph capture on a
+    HIP device, :func:`wp.capture_while <warp.capture_while>` is lowered by unrolling
+    the loop body into the parent graph a fixed number of times (32 unless the unroll
+    bound was lowered for that stream), with a device-side refresh of the condition
+    between copies. Warp-generated kernels read that condition and return immediately
+    when it is false, so the loop stops doing work at the right iteration and a
+    condition that is already false on entry runs zero iterations — the same answers
+    CUDA produces. The cost model differs, though: every copy is still *dispatched*,
+    so a loop that converges early pays the launch overhead of the remaining copies.
+    Lower the bound with the unroll-bound control when the iteration budget is known.
+
+    Three things are still not predicated on HIP, because nothing in the unrolled
+    copy can be rebound after the fact:
+
+    * A body passed as an already-captured :class:`Graph` rather than a callable.
+      Its kernel nodes were recorded outside the region, so
+      :func:`wp.capture_while <warp.capture_while>` raises ``NotImplementedError``
+      on HIP rather than run every copy unconditionally. Pass a callable instead.
+    * Non-kernel nodes in the body — a ``memcpy``, a ``memset``, or a nested child
+      graph — are cloned verbatim and re-run on every copy. Warp warns once when it
+      finds one.
+    * Kernels dispatched from inside the native library, such as the ones behind
+      Warp's built-in array fills and strided copies. These are ordinary kernel
+      nodes in the body graph, so they are cloned like any other, but they are not
+      Warp codegen and carry no condition parameter, so they run on every copy.
+      **This can be a wrong answer, not just wasted dispatch**, for any operation
+      whose result depends on how many times it ran.
+
+    The :mod:`warp.utils` operations are a separate case, and a stricter one. Each
+    of :func:`wp.utils.radix_sort_pairs`, :func:`wp.utils.segmented_sort_pairs`,
+    :func:`wp.utils.array_scan`, :func:`wp.utils.runlength_encode`,
+    :func:`wp.utils.array_sum` and :func:`wp.utils.array_inner` allocates a
+    temporary buffer for its hipCUB/rocPRIM dispatch, and a conditional body graph
+    cannot allocate — so on HIP they do not run inside a region at all, rather than
+    running too many times:
+
+    * The two sort entry points log ``CUDA error 900: operation not permitted when
+      stream is capturing`` and **return normally, leaving the destination
+      unchanged**. Nothing raises, so this is silent unless the warning is read.
+    * The scan, reduction and run-length entry points emit a graph allocation node,
+      which makes the enclosing region raise ``Conditional body graph contains an
+      unsupported operation (memory allocation)`` when it closes.
+
+    Warp logs a warning the first time any of them is called inside a region.
+    Move the call outside the loop body, or call
+    :func:`wp.capture_while <warp.capture_while>` outside of a graph capture, where
+    the condition is evaluated on the host and the body runs the right number of
+    times.
+
+    A library kernel *is* a kernel node, so the node-type check that reports the
+    ``memcpy`` / ``memset`` / child-graph cases above cannot tell it from one Warp
+    generated itself. Warp catches the general case by counting instead: every
+    kernel Warp generates is dispatched through a path that binds the condition
+    pointer, so if the finished body graph holds more kernel nodes than the region
+    bound conditions, the difference came from somewhere Warp does not control and
+    is unpredicated. That covers kernels dispatched by any native library, not only
+    the :mod:`warp.utils` entry points listed above, and it is reported once per
+    process as a lower bound. The count is skipped when a conditional region is
+    nested inside another, because the inner region splices its own unrolled copies
+    into the outer body graph and the comparison no longer means anything.
+
+    :func:`wp.capture_if <warp.capture_if>` still raises a ``RuntimeError`` inside a
+    graph capture on HIP. The predication mechanism it was waiting on now exists, but
+    selecting between two branches needs the inverse condition as well, which is
+    separate work. Outside of a capture it behaves normally, evaluating the condition
+    on the host as described above.
+
 
 .. _cpu_graphs:
 

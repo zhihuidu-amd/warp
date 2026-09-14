@@ -35,8 +35,8 @@ static inline nvPTXCompileResult nvPTXCompilerCreate(nvPTXCompilerHandle* compil
     return NVPTXCOMPILE_ERROR_INTERNAL;
 }
 
-static inline nvPTXCompileResult nvPTXCompilerCompile(nvPTXCompilerHandle compiler, int num_options,
-                                                      const char* const* options)
+static inline nvPTXCompileResult
+nvPTXCompilerCompile(nvPTXCompilerHandle compiler, int num_options, const char* const* options)
 {
     (void)compiler;
     (void)num_options;

@@ -251,8 +251,12 @@ template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_xor(wp::a
     result.shape = wp::warp_shuffle_xor(val.shape, lane_mask);
     for (int i = 0; i < wp::ARRAY_MAX_DIMS; ++i)
         result.strides[i] = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, val.strides[i], lane_mask);
-    result.ndim = static_cast<uint16_t>(__shfl_xor_sync(WP_TILE_FULL_WARP_MASK, static_cast<unsigned int>(val.ndim), lane_mask));
-    result.flags = static_cast<uint16_t>(__shfl_xor_sync(WP_TILE_FULL_WARP_MASK, static_cast<unsigned int>(val.flags), lane_mask));
+    result.ndim = static_cast<uint16_t>(
+        __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, static_cast<unsigned int>(val.ndim), lane_mask)
+    );
+    result.flags = static_cast<uint16_t>(
+        __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, static_cast<unsigned int>(val.flags), lane_mask)
+    );
 
     return result;
 }
@@ -645,14 +649,11 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_warp_mask_t ballot_mask)
 {
     // Lanes 0..lane inclusive: LANES_BELOW(lane) is exclusive, so add this lane.
-    wp_tile_warp_mask_t mask
-        = WP_TILE_LANES_BELOW(lane) | (((wp_tile_warp_mask_t)1) << (wp_tile_warp_mask_t)lane);
+    wp_tile_warp_mask_t mask = WP_TILE_LANES_BELOW(lane) | (((wp_tile_warp_mask_t)1) << (wp_tile_warp_mask_t)lane);
     return (int)WP_TILE_POPC(ballot_mask & mask);
 }
 
-inline CUDA_CALLABLE int warp_scan_inclusive(
-    int lane, wp_tile_warp_mask_t mask, bool thread_contributes_element
-)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_warp_mask_t mask, bool thread_contributes_element)
 {
     return warp_scan_inclusive(lane, __ballot_sync(mask, thread_contributes_element));
 }

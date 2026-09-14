@@ -10,6 +10,36 @@ import numpy as np
 import warp as wp
 from warp.tests.unittest_utils import *
 
+# ROCm has no conditional graph node, so the HIP backend lowers the conditional
+# capture APIs by other means, and the difference is visible from here. Ask the
+# driver once.
+_HIP_BACKEND = any(d.is_hip for d in wp.get_cuda_devices())
+
+# wp.capture_if() has no lowering inside a graph capture on HIP: the static-unroll
+# fallback would run the branch the condition selected against instead of skipping
+# it, so the native layer refuses rather than return a wrong answer.
+CONDITIONAL_IF_SUPPORTED = wp.is_conditional_graph_supported() and not _HIP_BACKEND
+
+# wp.capture_while() on HIP is lowered as a predicated static unroll: the body is
+# cloned into the parent graph a fixed number of times with a device-side refresh
+# of the condition between copies. Nothing predicates the clones at the graph
+# level, so each generated kernel takes a hidden trailing guard pointer and returns
+# early when the region's condition word reads zero (codegen.py, and the rationale
+# in warp/native/hipgraph_cond.h). With that in place a body that acts
+# unconditionally -- multiply_by_two_kernel_limited, below -- is skipped correctly,
+# so test_while_capture runs here.
+#
+# Before the guard existed this was a silent wrong answer, not merely wasted work:
+# measured on gfx942 (job 67923151), with the condition false on entry the array
+# came back scaled by 2**32, i.e. all 32 unrolled copies doubled it. The cond == 0
+# arm of test_while_capture is the regression test for exactly that.
+#
+# A body passed as an already-captured Graph is the case that remains unsupported:
+# its kernel nodes were recorded outside the region with a null guard baked into
+# their parameter blocks, and a graph node's params cannot be rebound at splice
+# time. context.py raises NotImplementedError rather than run the full unroll.
+CONDITIONAL_WHILE_GRAPH_BODY = wp.is_conditional_graph_supported() and not _HIP_BACKEND
+
 
 @wp.kernel
 def multiply_by_one_kernel(array: wp.array[wp.float32]):
@@ -111,7 +141,7 @@ def launch_multiply_by_three_or_eleven(array: wp.array[wp.float32], cond: wp.arr
     )
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_if_capture(test, device):
     assert device.is_cuda
 
@@ -145,7 +175,7 @@ def test_if_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_if_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -230,7 +260,7 @@ def test_if_with_subgraph(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_if_else_capture(test, device):
     assert device.is_cuda
 
@@ -265,7 +295,7 @@ def test_if_else_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_if_else_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -361,7 +391,7 @@ def test_if_else_with_subgraph(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_else_capture(test, device):
     assert device.is_cuda
 
@@ -395,7 +425,7 @@ def test_else_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_else_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -482,7 +512,6 @@ def test_else_with_subgraph(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
 def test_while_capture(test, device):
     assert device.is_cuda
 
@@ -521,7 +550,10 @@ def test_while_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(
+    CONDITIONAL_WHILE_GRAPH_BODY,
+    "A pre-captured Graph body cannot be bound to the region's guard on HIP; capture_while() refuses it",
+)
 def test_while_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -618,7 +650,7 @@ def test_while_with_subgraph(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_complex_capture(test, device):
     assert device.is_cuda
 
@@ -705,7 +737,7 @@ def test_complex_capture(test, device):
                         np.testing.assert_array_equal(array.numpy(), base)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_complex_capture_with_subgraphs(test, device):
     assert device.is_cuda
 
@@ -961,7 +993,7 @@ def test_graph_debug_dot_print(test, device):
 # ================================================================================================================
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_free_during_body_capture(test, device):
     """Test freeing a parent-graph allocation while a conditional body graph is being captured.
 
@@ -1044,7 +1076,7 @@ def body_with_alloc():
     wp.zeros(10)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_error_alloc_if(test, device):
     with wp.ScopedDevice(device):
         cond = wp.ones(1, dtype=wp.int32)
@@ -1055,7 +1087,7 @@ def test_error_alloc_if(test, device):
                 wp.capture_if(condition=cond, on_true=body_with_alloc)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_error_alloc_else(test, device):
     with wp.ScopedDevice(device):
         cond = wp.ones(1, dtype=wp.int32)
@@ -1077,7 +1109,7 @@ def test_error_alloc_while(test, device):
                 wp.capture_while(condition=cond, while_body=body_with_alloc)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_error_alloc_if_subgraph(test, device):
     with wp.ScopedDevice(device):
         # capture body subgraph
@@ -1092,7 +1124,7 @@ def test_error_alloc_if_subgraph(test, device):
                 wp.capture_if(condition=cond, on_true=body_capture.graph)
 
 
-@unittest.skipUnless(wp.is_conditional_graph_supported(), "Conditional graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_error_alloc_else_subgraph(test, device):
     with wp.ScopedDevice(device):
         # capture body subgraph
@@ -1115,9 +1147,20 @@ def test_error_alloc_while_subgraph(test, device):
             body_with_alloc()
 
         cond = wp.ones(1, dtype=wp.int32)
-        with test.assertRaisesRegex(
-            RuntimeError, r"Child graph contains an unsupported operation \(memory allocation\)"
-        ):
+
+        # What is being tested is the same on both backends -- a Graph body that cannot be
+        # lowered is rejected with a clear error rather than corrupting the capture -- but
+        # the reason differs, and HIP's is reached first. There a Graph body is refused
+        # outright, allocation or not, because its kernel nodes cannot be bound to the
+        # region's condition and every unrolled copy would run regardless (see
+        # warp/native/hipgraph_cond.h). NotImplementedError is a RuntimeError subclass, so
+        # only the expected message changes.
+        if CONDITIONAL_WHILE_GRAPH_BODY:
+            expected = r"Child graph contains an unsupported operation \(memory allocation\)"
+        else:
+            expected = r"capture_while\(\) with a Graph body is not supported on HIP"
+
+        with test.assertRaisesRegex(RuntimeError, expected):
             with wp.ScopedCapture():
                 wp.capture_while(condition=cond, while_body=body_capture.graph)
 
