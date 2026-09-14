@@ -60,6 +60,50 @@ Fix is already in our tree at `warp/native/warp.cu:3806`, commit `7293165ea`
 
 ---
 
+### 2. `test_atomic_cas.py` requires independent thread scheduling, but is registered for every device
+
+Verified 2026-09-14. `warp/tests/test_atomic_cas.py` exists in `upstream/main`
+byte-identical to ours (`git diff upstream/main HEAD --` is empty), and all four
+registration loops pass `devices=devices` with **no architecture guard**
+(upstream lines 285, 289, 292, 295).
+
+Every one of these tests runs a **GPU spinlock**: `n = 100` threads contend for a
+single lock with
+
+```python
+while wp.atomic_cas(lock, 0, 0, warp_type(0), warp_type(1)) == 1:
+    pass
+```
+
+The thread that wins the CAS must exit the loop and reach
+`spinlock_release_2d()` while its siblings are still spinning. That requires
+**independent forward progress between threads of the same warp**. CUDA
+guarantees that only from Volta (sm_70) onward; under the older reconvergence
+model the winning lane cannot leave the loop until every lane leaves, so it can
+never release the lock. The result is a deadlock — the process hangs at zero CPU
+rather than failing an assertion.
+
+Warp still emits pre-Volta targets: `warp/_src/build_dll.py:526` lists
+`sm_52`, `sm_60`, `sm_61` alongside `sm_70`. On any of those devices this test
+module hangs the suite.
+
+**Why it's upstreamable:** the fix is to register these tests only for devices
+that provide independent thread scheduling, which is a statement about CUDA
+compute capability and needs no mention of AMD. It is also test-only — no
+runtime or codegen change.
+
+**Honest limits, both of which belong in the PR body:**
+
+- I have **not** run this on a pre-Volta CUDA device. The claim rests on CUDA's
+  documented scheduling semantics plus the fact that Warp builds those targets,
+  not on a measurement. State it that way.
+- Only `test_cas_2d_float32` was *observed* to hang on gfx942. That it is the
+  alphabetically first test in the module (`'2' < '3' < '4' < 'f'`, and
+  `'f' < 'i' < 'u'` among the 2d dtypes) makes "all of them share this
+  dependency, and the runner simply stops at the first" the natural reading —
+  but that is an inference from ordering, not a measured result for the other
+  fifteen.
+
 ## TO VERIFY
 
 ### 3. `hipGraphAddMemFreeNode` fails during capture
@@ -69,11 +113,7 @@ graph, returns 1 on a capturing one. If it turns out Warp is adding the free
 node at a point the CUDA API also disallows, the ordering fix would be
 vendor-neutral. Investigate before assuming it is purely a HIP issue.
 
-### 4. `test_cas_2d_float32` hangs on gfx942
-
-Zero CPU, not slow. Unknown whether the test or the atomic path is at fault.
-If the test has a latent race that CUDA's memory model happens to hide, the
-test fix is upstreamable.
+*(nothing currently pending verification here — see below)*
 
 ---
 
