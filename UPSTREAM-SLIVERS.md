@@ -106,14 +106,8 @@ runtime or codegen change.
 
 ## TO VERIFY
 
-### 3. `hipGraphAddMemFreeNode` fails during capture
-
-Currently believed to be a ROCm defect, not a Warp bug — works on a hand-built
-graph, returns 1 on a capturing one. If it turns out Warp is adding the free
-node at a point the CUDA API also disallows, the ordering fix would be
-vendor-neutral. Investigate before assuming it is purely a HIP issue.
-
-*(nothing currently pending verification here — see below)*
+*Empty as of 2026-09-14 — every candidate raised so far has been resolved into
+CONFIRMED or REJECTED. New candidates land here first.*
 
 ---
 
@@ -130,6 +124,31 @@ The three-state distinction was a *diagnosis* written down while chasing the
 `test_async` poison, not a change that ever landed. Nothing to upstream, and
 nothing to compare against upstream. Removed from TO VERIFY rather than left
 sitting there implying work exists.
+
+### `hipGraphAddMemFreeNode` during capture
+
+Checked 2026-09-14. This is a ROCm defect, not a Warp bug, and the probe
+(job 67878631) isolates it properly — the call was run four ways and the only
+variable that changed the outcome was whether the target graph came from an
+active stream capture:
+
+    hand-built graph, free depends on alloc  -> 0
+    hand-built graph, zero dependencies      -> 0
+    capture graph, capture-frontier deps     -> 1 (hipErrorInvalidValue)
+    capture graph, zero dependencies         -> 1
+
+Not a dependency-list problem and not a missing binding. Warp is adding the free
+node at a point CUDA explicitly permits — it is how the CUDA path works today and
+passes. Nothing to fix upstream. Worth filing against ROCm.
+
+**Weak sub-candidate, also rejected.** On failure Warp prints a warning and then
+`g_graph_allocs.erase(alloc_iter)`, dropping its record of an allocation the
+graph still owns — the allocation leaks and the only signal is stderr. Upstream
+has the identical code. But unlike candidate 1, this is **not** an internal
+inconsistency: all three failure returns in that block erase, so the pattern
+reads as deliberate rather than as one path that forgot. Without a maintainer's
+intent to point to, there is no argument here that does not reduce to "we would
+have written it differently."
 
 ### Segmented-sort offset iterator (`sort.cu`)
 
