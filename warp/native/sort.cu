@@ -179,7 +179,24 @@ static bool acquire_temp_buffer(size_t size, TempBuffer& temp_ret)
             temp_ret.size = temp_ret.mem ? size : 0;
             temp_ret.is_ephemeral = true;
         } else {
-            cached_side_alloc(size, mempool_supported, stream, capture_id, capture, temp_ret);
+            // `async` picks the allocator: true takes wp_alloc_device_async() on a
+            // non-capturing side stream, false takes the synchronous cudaMalloc().
+            // CUDA permits either under cudaThreadExchangeStreamCaptureMode(Relaxed).
+            // ROCm honors Relaxed for the synchronous allocator only, and refuses
+            // hipMallocAsync with error 900 even on a stream that is not capturing.
+            // Measured on gfx942, with a Global-mode control confirming that the
+            // Relaxed swap is what permits the synchronous case at all:
+            //   hipMalloc      + Relaxed -> ok        hipMalloc      + Global -> 900
+            //   hipMallocAsync + Relaxed -> 900
+            // Until that changes, every sort reaching this fallback on HIP -- from a
+            // conditional body graph, or any unregistered capture -- returned its
+            // input unsorted and reported only on stderr.
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+            const bool async_temp_alloc = false;
+#else
+            const bool async_temp_alloc = mempool_supported;
+#endif
+            cached_side_alloc(size, async_temp_alloc, stream, capture_id, capture, temp_ret);
         }
     } else {
         // No capture, use global temp cache.
