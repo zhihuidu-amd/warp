@@ -27,7 +27,7 @@ vocabulary, in the same way `WP_ENABLE_CUDA` already gates the CUDA layer.
 | R2  | No new required dependency for CUDA-only users | Must | ROCm toolchain is opt-in |
 | R3  | Translation concentrated in one header, not scattered at call sites | Must | Bounds long-term maintenance cost |
 | R4  | Capability differences expressed at runtime where possible | Must | So NVIDIA CI compiles and exercises the code paths |
-| R5  | Fewer than 30 preprocessor guards added to existing files | Should | Measurable proxy for R3 |
+| R5  | Fewer than 30 preprocessor guards added to existing files | Should | Measurable proxy for R3. **Met: 21 guards across 9 existing files** (plus 11 in 6 new HIP-only files, which carry no merge risk) |
 | R6  | AMD-hosted CI runners for the HIP path | Should | NVIDIA CI cannot test AMD hardware |
 | R7  | Public API and type signatures unchanged where possible | Should | One known exception, see "Compile architecture" |
 
@@ -159,26 +159,73 @@ rejects a 32-bit one outright:
 Making this portable means WP_TILE_WARP_SIZE becoming architecture-dependent and
 the mask type widening with it, across 44 uses in four files
 (`tile_reduce.h`, `tile_scan.h`, `tile_radix_sort.h`, `sparse.cu`). Because it
-changes shared-memory sizing and lane arithmetic in tuned code, it is staged
+changes shared-memory sizing and lane arithmetic in tuned code, it was staged
 separately rather than folded into the enablement work.
+
+**This is now done and upstream.** [GH-1865] parameterized the warp size and
+widened the lane masks, and it merged on its own merits with no HIP in the diff
+— it is a portability fix, not an AMD feature. Correctness on `gfx942` is
+verified for tile sort across 8 of 9 sizes. One subtlety worth recording,
+because it is the kind of thing that looks like a bug on review: the bitonic
+shuffle is bounded by *stride*, not by lane, so a block-wide caller reaches the
+"subwarp" shuffle path, and it is `stride <= 16` — not the wavefront width —
+that makes a 32-wide shuffle safe there.
 
 **Graph capture.** ROCm supports stream capture but not conditional graph nodes.
 Warp's conditional-node paths are therefore gated on a runtime capability query, and
 `capture_save()` is unavailable on HIP because the `.wrp` format does not encode `gfx`
 architectures.
 
+`wp.capture_while()` is lowered as a **predicated static unroll**: the body graph is
+cloned into the parent up to 32 times, with a device-side condition refresh between
+copies. The clones must self-skip, or a loop whose condition is false on entry still
+runs its body 32 times — measured, that returned an array scaled by 2^32 with no
+warning. Warp-generated kernels therefore take a hidden trailing
+`const unsigned int* _wp_cond_guard` and return immediately when it reads zero. The
+load is **relaxed, not acquire**: a per-thread acquire load measured a 73x dispatch
+penalty on CDNA, and the graph edge from the refresh node already supplies the
+ordering. The null test comes first, so a kernel launched outside any region pays a
+register compare rather than a memory load.
+
+Three categories of body content cannot be predicated this way, and are refused or
+warned about rather than left to run silently: a body passed as an already-captured
+`Graph` (its kernel nodes were recorded outside the region and cannot be rebound),
+non-kernel nodes such as `memcpy`/`memset`, and native library kernels, which are
+real kernel nodes carrying no guard prologue and so are detectable only by *counting*
+kernel nodes against the number of bound conditions.
+
+`wp.capture_if()` remains refused on HIP. No correct lowering exists under an
+unconditional unroll — it would execute the branch the condition selected against.
+The guard mechanism this work adds is the prerequisite; wiring `hipGraphCondTypeIf`
+plus an inverting seed kernel is follow-on work.
+
+CUDA is unaffected by all of the above: the codegen format slot is empty there and the
+argument append is gated on the HIP runtime, so generated CUDA source is
+byte-identical by measurement.
+
 ### Staging
 
 The work is proposed as a sequence of independently reviewable and revertable changes,
 rather than a single large one:
 
+0. **Portability prerequisites** — *already merged, no HIP in the diff.*
+   [GH-1702] (empty-array and typing fixes) and [GH-1865] (warp-size
+   parameterization and lane-mask widening across the tile headers and
+   `sparse.cu`). Both landed on their own merits. Nothing in the remaining
+   stages re-litigates them.
 1. **Enablement** — build system, `hip_util.h`, device init. Produces a Warp that
-   builds and runs basic kernels on `gfx942`. The warp-size-dependent sources
-   (`sparse.cu` and the tile headers) are staged with the tile work below.
-2. **Graph capture** — stream capture, mempool interaction (builds on [GH-1702]).
+   builds and runs basic kernels on `gfx942`.
+2. **Graph capture** — stream capture, mempool interaction, and the predicated
+   unroll for `wp.capture_while()` described above.
 3. **Tile / MMA** — the rocWMMA-backed paths.
 4. **CI** — AMD-hosted runners.
 5. **Examples and documentation.**
+
+Stage 0 is listed to make a point about method rather than to claim credit: the
+portability work was separable from the backend, and separating it is what let it
+land upstream without anyone having to decide about AMD. We would expect to keep
+splitting work that way — anything defensible on CUDA alone goes up as its own PR
+as we find it, not batched behind the backend.
 
 ## Testing Strategy
 
@@ -199,3 +246,20 @@ validated out-of-tree, which reintroduces the silent-rot failure mode described 
 **Known gaps to close before "Implemented".** Numerical agreement between CUDA and HIP
 for the tile paths, behavior on RDNA parts, and multi-GPU/IPC surfaces are not yet
 characterized.
+
+**There is no clean full-suite number yet, and this document will not round one up.**
+`test_conditional_captures.py` passes on `gfx942` and tile sort is verified across 8 of
+9 sizes, but the following are open and must be resolved or explicitly waived before any
+claim of suite-level health:
+
+- `test_cas_2d_float32` hangs on `gfx942` — zero CPU, not slow.
+- `hipGraphAddMemFreeNode` fails when the graph is capturing, though it succeeds on a
+  hand-built graph. This looks like a ROCm defect and is the blocker behind the
+  `test_graph` failures.
+- A single invalidated capture poisons the process, so one genuine error can present as
+  thousands. Error *counts* from a HIP suite run are therefore not a meaningful measure
+  until the originating event is isolated.
+
+The last point is a measurement hazard as much as a defect: a run reporting 2087 errors
+and a run reporting one may be the same event. Any suite number quoted for the HIP path
+should state whether cascade suppression was in effect.
