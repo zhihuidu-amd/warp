@@ -3797,12 +3797,16 @@ bool wp_cuda_graph_end_capture(void* context, void* stream, void** graph_ret)
         // On HIP the same failed copy INVALIDATES the capture, EndCapture then
         // fails, and without this the leak is permanent.
         //
-        // Measured cost of the leak (job 67846710, warp.tests.cuda.test_async):
-        // 259 tests pass, then one capturing h2d copy reports ok while leaving
-        // the device dead, and only 27 of the next ~2100 pass. Everything after
-        // fails with error 901 (hipErrorStreamCaptureIsolation), plus ~1044
-        // bogus "Failed to allocate" errors from the allocator inheriting the
-        // dead context -- it fails on 4-byte requests, so not memory pressure.
+        // Reproduced in isolation (job 67846834): an h2d copy inside a capture
+        // with the mempool DISABLED allocates during capture, which is illegal
+        // and correctly fails; the bug is that the failed EndCapture then leaks
+        // the bookkeeping. The same shape with mempools enabled survives.
+        //
+        // Do NOT cite job 67846710's test_async cascade as evidence here. Job
+        // 67852953 traced that window with WP_TRACE_CAPTURE=1 and found
+        // EndCapture calls: 0 -- those streams were already invalidated before
+        // Warp's capture entry points ran, so this fix is not what addresses
+        // that cascade. It remains a separate, still-open problem.
         clean_up();
         return false;
     }
