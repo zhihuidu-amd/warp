@@ -1204,6 +1204,16 @@ WP_API bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_re
 // guard for a region that will never open is harmless, and returning false here
 // would make capture_if fail on a CPU device for a reason unrelated to it.
 WP_API bool wp_cuda_graph_set_enclosing_guard(void* stream, void* guard) { return true; }
+// Succeeds with nothing to do, for the same reason: there is no unroll to bound and no
+// region that could be truncated, so reporting zero truncations is the accurate answer
+// rather than a failure.
+WP_API bool wp_cuda_graph_set_max_iters(void* stream, unsigned int max_iters) { return true; }
+WP_API bool wp_cuda_graph_query_truncations(unsigned int* count_ret)
+{
+    if (count_ret)
+        *count_ret = 0u;
+    return true;
+}
 WP_API bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret) { return false; }
 WP_API bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph) { return false; }
 WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_graph) { return false; }

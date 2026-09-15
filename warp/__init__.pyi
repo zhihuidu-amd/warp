@@ -184,6 +184,7 @@ from warp._src.utils import ScopedAllocator as ScopedAllocator
 from warp._src.context import CaptureMode as CaptureMode
 from warp._src.utils import ScopedCapture as ScopedCapture
 from warp._src.context import is_conditional_graph_supported as is_conditional_graph_supported
+from warp._src.context import conditional_graph_truncations as conditional_graph_truncations
 from warp._src.context import Graph as Graph
 from warp._src.context import capture_begin as capture_begin
 from warp._src.context import capture_end as capture_end

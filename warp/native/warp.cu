@@ -4871,6 +4871,36 @@ bool wp_cuda_graph_set_enclosing_guard(void* stream, void* guard)
 #endif
 }
 
+bool wp_cuda_graph_set_max_iters(void* stream, unsigned int max_iters)
+{
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    return wp_hip_graph_set_max_iters(stream, max_iters);
+#else
+    // CUDA has no bound to set. CU_GRAPH_NODE_TYPE_CONDITIONAL re-evaluates the
+    // condition after each pass and stops when it goes false, so the loop runs
+    // exactly as many iterations as the body asks for. Accepting and ignoring the
+    // value keeps the caller backend-agnostic.
+    (void)stream;
+    (void)max_iters;
+    return true;
+#endif
+}
+
+bool wp_cuda_graph_query_truncations(unsigned int* count_ret)
+{
+    if (!count_ret)
+        return false;
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    return wp_hip_graph_query_truncations(count_ret);
+#else
+    // Truncation is an artifact of the static unroll; CUDA has no bound and so no
+    // way to exceed one. Zero is the correct answer, not "unsupported" -- a test
+    // asserting no truncation should pass on CUDA rather than have to skip.
+    *count_ret = 0u;
+    return true;
+#endif
+}
+
 bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle)
 {
     ContextGuard guard(context);

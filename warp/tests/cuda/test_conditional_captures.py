@@ -556,6 +556,66 @@ def test_while_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
+def test_while_capture_iteration_bound(test, device):
+    """A while loop that wants more iterations than the HIP unroll bound is reported, not silently cut short.
+
+    The HIP lowering is a static unroll of ``warp.config.hip_conditional_max_iters``
+    predicated body copies, so it has an iteration bound a real conditional node does
+    not. A loop that exceeds it stops with its condition still set and returns an
+    under-iterated result, which is why the bound is counted and reported rather than
+    left to be inferred downstream. CUDA has no bound, so the same capture runs to
+    completion there and the count stays zero -- asserted rather than skipped, since
+    "no truncation" is the correct answer on both backends.
+    """
+    assert device.is_cuda
+
+    # 1 doubled until it exceeds 1000 is ten iterations, so a bound of four truncates
+    # and the default of 32 does not.
+    saved = wp.config.hip_conditional_max_iters
+
+    def run(bound):
+        wp.config.hip_conditional_max_iters = bound
+        array = wp.zeros(4, dtype=wp.float32)
+        condition = wp.zeros(1, dtype=wp.int32)
+        wp.load_module(device=device)
+
+        with wp.ScopedCapture(force_module_load=False) as capture:
+            wp.capture_while(
+                condition,
+                launch_multiply_by_two_until_limit,
+                array=array,
+                cond=condition,
+                limit=1000.0,
+            )
+
+        array.assign([1.0, 1.0, 1.0, 1.0])
+        condition.assign([1])
+
+        before = wp.conditional_graph_truncations(device)
+        wp.capture_launch(capture.graph)
+        wp.synchronize_device(device)
+        return array.numpy(), wp.conditional_graph_truncations(device) - before
+
+    try:
+        with wp.ScopedDevice(device):
+            # Enough copies for the loop to finish: correct result, nothing reported.
+            values, truncated = run(32)
+            np.testing.assert_array_equal(values, np.full(4, 1024.0, dtype=np.float32))
+            test.assertEqual(truncated, 0)
+
+            # Too few. On HIP the loop is cut short and says so; on CUDA the bound is
+            # ignored and the loop finishes as before.
+            values, truncated = run(4)
+            if _HIP_BACKEND:
+                np.testing.assert_array_equal(values, np.full(4, 16.0, dtype=np.float32))
+                test.assertGreater(truncated, 0)
+            else:
+                np.testing.assert_array_equal(values, np.full(4, 1024.0, dtype=np.float32))
+                test.assertEqual(truncated, 0)
+    finally:
+        wp.config.hip_conditional_max_iters = saved
+
+
 @unittest.skipUnless(
     CONDITIONAL_WHILE_GRAPH_BODY,
     "A pre-captured Graph body cannot be bound to the region's guard on HIP; capture_while() refuses it",
@@ -1203,6 +1263,12 @@ add_function_test(
     TestConditionalCaptures, "test_else_capture_with_subgraph", test_else_capture_with_subgraph, devices=cuda_devices
 )
 add_function_test(TestConditionalCaptures, "test_while_capture", test_while_capture, devices=cuda_devices)
+add_function_test(
+    TestConditionalCaptures,
+    "test_while_capture_iteration_bound",
+    test_while_capture_iteration_bound,
+    devices=cuda_devices,
+)
 add_function_test(
     TestConditionalCaptures, "test_while_capture_with_subgraph", test_while_capture_with_subgraph, devices=cuda_devices
 )

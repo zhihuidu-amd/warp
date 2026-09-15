@@ -92,6 +92,16 @@
 // already capturing, so an explicit early call is the clean path.
 bool wp_hip_graph_reserve_cond_pool(unsigned int slots);
 
+// How many while-regions on the current device hit the end of their unroll with
+// the condition still set, i.e. how many loops were silently truncated.
+//
+// The static unroll has an iteration bound that a real CUDA conditional node
+// does not, so a loop needing more iterations than the bound stops early and
+// returns an under-iterated result. Nothing portable is watching for that, so it
+// is counted on device and reported here. Cumulative over the process;
+// synchronize the replay before reading.
+bool wp_hip_graph_query_truncations(unsigned int* count_out);
+
 // Open a conditional (while) region on `stream` and hand Warp a graph to fill.
 //
 // `condition` is a device pointer to an int that the body updates; the region

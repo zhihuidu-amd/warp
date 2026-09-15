@@ -168,6 +168,16 @@ bool wp_hip_graph_reserve_cond_pool(unsigned int slots)
     return true;
 }
 
+bool wp_hip_graph_query_truncations(unsigned int* count_out)
+{
+    if (!count_out)
+        return false;
+    hipError_t err = hipGraphCondQueryTruncations(count_out);
+    if (err != hipSuccess)
+        return report(err, "hipGraphCondQueryTruncations");
+    return true;
+}
+
 bool wp_hip_graph_insert_while(void* stream, int* condition, void** body_graph_ret, uint64_t* handle_ret)
 {
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);

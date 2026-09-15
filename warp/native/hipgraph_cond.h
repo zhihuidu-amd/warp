@@ -233,6 +233,25 @@ hipError_t hipGraphCondPoolReserve(unsigned int slots);
 hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out, unsigned int* used_out);
 
 /**
+ * How many while-regions on this device have reached the end of their unroll
+ * with the condition still set.
+ *
+ * Each one is a loop that wanted more iterations than the static bound allowed
+ * and was TRUNCATED: the caller got an under-iterated result. A real conditional
+ * WHILE node has no bound and cannot do this, so there is no CUDA analogue and
+ * nothing in a portable caller is watching for it -- which is exactly why it is
+ * reported rather than left to be inferred from a wrong answer downstream.
+ *
+ * The counter is cumulative over the process and is incremented by a graph node,
+ * so synchronise the replay before reading. A non-zero value means the bound is
+ * too low: raise it with hipGraphCondSetMaxIters() to at least the caller's own
+ * iteration budget.
+ *
+ * Returns zero for a device that has never reserved a slab.
+ */
+hipError_t hipGraphCondQueryTruncations(unsigned int* count_out);
+
+/**
  * Device address of the condition slot.
  *
  * This is the escape hatch for callers who want to write the condition from

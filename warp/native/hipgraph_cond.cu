@@ -150,6 +150,42 @@ __global__ void hgc_write_complement(unsigned int* slot, const int* condition)
     }
 }
 
+/* Terminal check for a while-region, emitted after the last unrolled body copy.
+ *
+ * A CUDA conditional WHILE node has no iteration bound: it re-evaluates until
+ * the condition goes false. The HIP lowering is a static unroll, so it has one
+ * by construction, and a loop that needs more iterations than the bound simply
+ * stops early -- the caller gets an under-iterated result with nothing set to
+ * say so. That is the one failure mode this whole file exists to avoid, so the
+ * region reports it rather than returning quietly.
+ *
+ * Reading the slot alone is already correct inside a nested region: if the
+ * enclosing guard was 0 then this region's seeds wrote 0 into the slot too, so
+ * a suppressed region cannot report truncation. No enclosing-guard conjunction
+ * is needed here, unlike hgc_set_condition.
+ *
+ * The print is latched to once per slab (per device, per process) because the
+ * node runs on every replay of the graph and a genuinely truncating loop would
+ * otherwise print on every step. The counter keeps incrementing, so a host-side
+ * query still sees the true total. */
+__global__ void hgc_check_truncated(const unsigned int* slot, unsigned int* diag, unsigned int max_iters)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        if (__atomic_load_n(slot, __ATOMIC_RELAXED) != 0u) {
+            __atomic_fetch_add(diag, 1u, __ATOMIC_RELAXED);
+            if (__atomic_exchange_n(diag + 1, 1u, __ATOMIC_RELAXED) == 0u) {
+                printf(
+                    "hipgraph_cond: a while-region still had its condition set after all %u unrolled body "
+                    "copies. The loop was TRUNCATED and its result is under-iterated. Raise the bound to at "
+                    "least the caller's iteration budget (warp.config.hip_conditional_max_iters on Warp builds, "
+                    "hipGraphCondSetMaxIters otherwise). Reported once per device per process.\n",
+                    max_iters
+                );
+            }
+        }
+    }
+}
+
 /* Reset the slot to its default at the start of a replay. Without this a graph
  * that converged on one replay would start the next replay already "done". */
 __global__ void hgc_reset_condition(unsigned int* slot, unsigned int value)
@@ -177,6 +213,12 @@ struct hipGraphCondHandle_st {
     int device = 0;
     unsigned int defaultValue = 1u;
     unsigned int flags = 0u;
+
+    /* Truncation counters in the trailing words of the same slab `slot` points
+     * into -- see SlotPool::diag. Cached here for the same reason as `slot`:
+     * spliceBody needs the address when it emits the terminal check, and it must
+     * be THIS handle's device, not whichever one happens to be current. */
+    unsigned int* diag = nullptr;
 
     /* Guard word of the region lexically enclosing this one, or null at top
      * level. Every seed that writes `slot` ANDs with it -- see hgc_set_condition
@@ -281,10 +323,22 @@ unsigned int* handleSeedArgsChecked(hipGraphCondHandle h, const unsigned int** e
 namespace {
 constexpr unsigned int kDefaultPoolSlots = 64;
 
+/* Two words past the slots, for the truncation diagnostics below. */
+constexpr unsigned int kDiagWords = 2;
+
 struct SlotPool {
     unsigned int* base = nullptr;
     unsigned int capacity = 0;
     unsigned int used = 0; /* high-water mark of never-yet-handed-out slots */
+
+    /* Trailing words of the same slab, past `capacity` and never handed out as
+     * slots: [0] counts while-regions that reached the end of their unroll with
+     * the condition still set, [1] is a print-once latch.
+     *
+     * Kept inside the slab rather than in a separate allocation so they inherit
+     * its lifetime and, more importantly, its device -- a diagnostic that faults
+     * on the second GPU is worse than no diagnostic at all. */
+    unsigned int* diag = nullptr;
 
     /* Slots whose handle was destroyed WITHOUT ever being spliced into a graph.
      *
@@ -361,7 +415,9 @@ hipError_t poolReserveLocked(SlotPool& pool, int device, unsigned int slots)
     }
 
     unsigned int* base = nullptr;
-    const size_t bytes = sizeof(unsigned int) * slots;
+    /* kDiagWords extra words past the slots hold the truncation diagnostics.
+     * pool.capacity stays at `slots`, so slot handout never reaches them. */
+    const size_t bytes = sizeof(unsigned int) * (slots + kDiagWords);
     /* Uncached so a store from one kernel is promptly visible to the next
      * without depending on L2 writeback timing. Plain device memory is also
      * correct -- every reader/writer pair is separated by a graph edge -- so
@@ -391,7 +447,16 @@ hipError_t poolReserveLocked(SlotPool& pool, int device, unsigned int slots)
         return err;
     }
 
+    /* Diagnostics start at zero; the slots above start at one. Separate memset
+     * because the fill values differ. */
+    err = hipMemsetD32(reinterpret_cast<hipDeviceptr_t>(base + slots), 0u, kDiagWords);
+    if (err != hipSuccess) {
+        HGC_BEST_EFFORT(hipFree(base));
+        return err;
+    }
+
     pool.base = base;
+    pool.diag = base + slots;
     pool.capacity = slots;
     pool.used = 0;
     pool.freeSlots.clear();
@@ -706,6 +771,7 @@ extern "C" hipError_t hipGraphCondHandleCreate(
     h->slotIndex = index;
     h->device = device;
     h->slot = pool.base + index;
+    h->diag = pool.diag;
     h->defaultValue = (defaultValue == hipGraphCondAssignZero) ? 0u : 1u;
     h->flags = flags;
     g_liveHandleSet.insert(h);
@@ -768,6 +834,31 @@ extern "C" hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out, unsigne
     if (used_out)
         *used_out = pool.base ? pool.used - static_cast<unsigned int>(pool.freeSlots.size()) : 0u;
     return hipSuccess;
+}
+
+extern "C" hipError_t hipGraphCondQueryTruncations(unsigned int* count_out)
+{
+    if (!count_out)
+        return hipErrorInvalidValue;
+
+    std::lock_guard<std::mutex> lk(g_lock);
+    /* Reports the CURRENT device's slab, matching hipGraphCondPoolStatus. */
+    int device = 0;
+    if (hipError_t err = currentDeviceLocked(&device); err != hipSuccess)
+        return err;
+    const SlotPool& pool = g_pools[device];
+    if (!pool.diag) {
+        /* No slab on this device means no region ever ran on it. Zero is the
+         * honest answer, not an error: a caller asserting "nothing truncated"
+         * should not have to special-case a device it never used. */
+        *count_out = 0u;
+        return hipSuccess;
+    }
+
+    /* Synchronous copy. The counter is written by a graph node, so the caller
+     * must have synchronised the replay before asking -- this only guarantees
+     * the read itself is ordered, not that the graph has finished. */
+    return hipMemcpyDtoH(count_out, reinterpret_cast<hipDeviceptr_t>(pool.diag), sizeof(unsigned int));
 }
 
 extern "C" hipError_t hipGraphCondHandleDestroy(hipGraphCondHandle handle)
@@ -1280,9 +1371,37 @@ hipError_t spliceBody(hipStream_t stream, CondRegion& region, hipGraph_t bodyGra
         deps = std::move(tail);
         ++embedded;
 
-        /* No refresh after the final body: nothing would consume it. */
-        if (i + 1 == region.maxIters)
+        /* No refresh after the final body: nothing would consume it. Emit the
+         * truncation check there instead -- it is the one thing that does still
+         * need to know whether the condition survived the last copy. */
+        if (i + 1 == region.maxIters) {
+            if (region.type == hipGraphCondTypeWhile && region.handle->diag) {
+                hipKernelNodeParams ckp;
+                std::memset(&ckp, 0, sizeof(ckp));
+                void* cargs[3] = { &region.handle->slot, &region.handle->diag, &region.maxIters };
+                ckp.func = reinterpret_cast<void*>(hgc_check_truncated);
+                ckp.gridDim = dim3(1);
+                ckp.blockDim = dim3(1);
+                ckp.sharedMemBytes = 0;
+                ckp.kernelParams = cargs;
+                ckp.extra = nullptr;
+
+                hipGraphNode_t checkNode = nullptr;
+                hipError_t cerr = hipGraphAddKernelNode(
+                    &checkNode, region.parentGraph, deps.empty() ? nullptr : deps.data(), deps.size(), &ckp
+                );
+                if (cerr == hipSuccess) {
+                    /* Chain it, so the caller's next work is ordered after the
+                     * check and a host query cannot read a stale counter. */
+                    deps.assign(1, checkNode);
+                } else {
+                    /* Losing the diagnostic is not worth losing the graph: the
+                     * bodies are already spliced and correct. Log and carry on. */
+                    HGC_LOG("splice: truncation-check node -> %d (%s)", (int)cerr, hipGetErrorString(cerr));
+                }
+            }
             break;
+        }
 
         hipKernelNodeParams kp;
         std::memset(&kp, 0, sizeof(kp));

@@ -812,6 +812,21 @@ WP_API bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_re
 // Must be called before wp_cuda_graph_insert_while / wp_cuda_graph_insert_if_else;
 // the value is parked per stream and consumed by the next one to open.
 WP_API bool wp_cuda_graph_set_enclosing_guard(void* stream, void* guard);
+// Bound the number of iterations the next conditional region opened on this stream
+// may run. Must be called before wp_cuda_graph_insert_while; the value is parked per
+// stream and consumed by the next region to open.
+//
+// HIP only, and a correctness control rather than a tuning knob: the HIP lowering is
+// a static unroll, so this bound is a hard cap. A loop that wants more iterations
+// than the bound is TRUNCATED -- it stops with its condition still set and returns an
+// under-iterated result. Callers must set this to at least their own iteration
+// budget. A no-op on CUDA, where a conditional node re-evaluates until the condition
+// goes false and has no bound to set.
+WP_API bool wp_cuda_graph_set_max_iters(void* stream, unsigned int max_iters);
+// How many conditional while-regions on the current device were truncated as above.
+// Cumulative over the process; synchronize the replay before reading. Always reports
+// zero on CUDA, where truncation cannot happen.
+WP_API bool wp_cuda_graph_query_truncations(unsigned int* count_ret);
 WP_API bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret);
 WP_API bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph);
 WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_graph);

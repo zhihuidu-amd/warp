@@ -7882,6 +7882,17 @@ class Runtime:
             ]
             self.core.wp_cuda_graph_set_enclosing_guard.restype = ctypes.c_bool
 
+            self.core.wp_cuda_graph_set_max_iters.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint,
+            ]
+            self.core.wp_cuda_graph_set_max_iters.restype = ctypes.c_bool
+
+            self.core.wp_cuda_graph_query_truncations.argtypes = [
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            self.core.wp_cuda_graph_query_truncations.restype = ctypes.c_bool
+
             self.core.wp_cuda_graph_pause_capture.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -13364,6 +13375,44 @@ def is_conditional_graph_supported() -> bool:
     )
 
 
+def conditional_graph_truncations(device: DeviceLike = None) -> int:
+    """Count :func:`warp.capture_while` loops that hit their iteration bound on ``device``.
+
+    HIP lowers a conditional region as a static unroll of
+    :attr:`warp.config.hip_conditional_max_iters` predicated body copies, so the bound is
+    a hard cap. A loop that needs more iterations than that stops early and returns an
+    under-iterated result -- there is no CUDA analogue, because a conditional node
+    re-evaluates until the condition goes false.
+
+    Each truncation is counted on device and also printed to ``stderr`` once per device
+    per process. Use this to assert the absence of truncation in a test or benchmark
+    rather than scraping that message.
+
+    The counter is cumulative over the process and is incremented by a graph node, so
+    synchronize the device before reading it.
+
+    Args:
+        device: The device to query. Uses the current device if ``None``.
+
+    Returns:
+        Number of truncated loops. Always ``0`` on CUDA, where the bound does not exist.
+    """
+    if runtime is None:
+        init()
+
+    device = get_device(device)
+    if not device.is_cuda:
+        return 0
+
+    count = ctypes.c_uint(0)
+    # The native side reports the current device's counters, so bind the context
+    # rather than trust whichever one happens to be current.
+    with device.context_guard:
+        if not runtime.core.wp_cuda_graph_query_truncations(ctypes.byref(count)):
+            raise RuntimeError(f"Failed to query conditional-graph truncations on device {device}")
+    return int(count.value)
+
+
 def capture_pause(
     device: DeviceLike = None,
     stream: Stream | None = None,
@@ -14009,6 +14058,19 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
     # branch re-arms its own guard between unroll copies and runs the whole
     # unroll anyway.
     _set_enclosing_guard(stream)
+
+    # Bound the unroll. On HIP this is a hard cap, not a hint: the region emits
+    # exactly this many body copies and a loop that wants more stops early with an
+    # under-iterated result. The native side counts and reports every such
+    # truncation, but the bound still has to be raised by whoever knows the
+    # iteration budget, and warp.config is the only channel that reaches here
+    # without changing this signature (**kwargs belongs to the body).
+    #
+    # A no-op on CUDA, where a conditional node has no bound.
+    if not runtime.core.wp_cuda_graph_set_max_iters(
+        stream.cuda_stream, ctypes.c_uint(warp.config.hip_conditional_max_iters)
+    ):
+        raise RuntimeError(f"Failed to set conditional iteration bound on device {device}")
 
     # insert conditional while-node
     body_graph = ctypes.c_void_p()
