@@ -90,7 +90,8 @@ bool hgcVerbose()
  * Device kernels
  * ------------------------------------------------------------------------ */
 
-/* Copy the user's int32 condition into the handle's slot.
+/* Copy the user's int32 condition into the handle's slot, conjoined with the
+ * guard of the enclosing region (if any).
  *
  * Deliberately a kernel and not hipMemcpyAsync: a kernel node is unambiguously
  * capturable and ordered, whereas the stream memory-op path is the one that
@@ -98,12 +99,54 @@ bool hgcVerbose()
  *
  * These are the only two places that need real memory ordering, and they cost
  * nothing because exactly one thread executes them. The GUARD READ in body
- * kernels must NOT use acquire -- see HIPGRAPH_COND_GUARD below. */
-__global__ void hgc_set_condition(unsigned int* slot, const int* condition)
+ * kernels must NOT use acquire -- see HIPGRAPH_COND_GUARD below.
+ *
+ * WHY `enclosing` EXISTS. A region is lowered as a predicated static unroll:
+ * the body graph is cloned into the parent and the body's *Warp* kernels
+ * self-skip on the guard word. The seed nodes -- this kernel, hgc_reset_condition,
+ * hgc_write_complement -- are NOT predicated, because something has to write the
+ * guard in the first place. That is fine at the top level and wrong as soon as
+ * regions nest: cloning an outer body graph clones the inner region's seed nodes
+ * too, and those clones execute even when the outer guard is 0, re-arming the
+ * inner guard straight from the user's untouched condition array. The inner body
+ * then runs inside a branch that was not taken.
+ *
+ * Measured on gfx942 before this conjunction, test_complex_capture with
+ * cond1=0, cond2=0 returned 5005 where 385 is correct -- exactly 385 x 13, the
+ * 13x kernel being the inner else body of the branch that was suppressed.
+ *
+ * ANDing here composes to any depth, because each enclosing guard was itself
+ * written by a seed that ANDed with *its* enclosing. A null `enclosing` means
+ * "top level" and reads as 1.
+ *
+ * The enclosing load is RELAXED, like the body guard read: the node that wrote
+ * it is an ancestor of this one in the graph, so the edge already orders them.
+ * See HIPGRAPH_COND_GUARD for the 73x measurement that makes acquire wrong. */
+__global__ void hgc_set_condition(unsigned int* slot, const int* condition, const unsigned int* enclosing)
 {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         const int v = __atomic_load_n(condition, __ATOMIC_RELAXED);
-        __atomic_store_n(slot, (v != 0) ? 1u : 0u, __ATOMIC_RELEASE);
+        unsigned int result = (v != 0) ? 1u : 0u;
+        if (enclosing && __atomic_load_n(enclosing, __ATOMIC_RELAXED) == 0u)
+            result = 0u;
+        __atomic_store_n(slot, result, __ATOMIC_RELEASE);
+    }
+}
+
+/* Write the logical complement of *condition into a slot. The else-branch half
+ * of an if/else pair: same ordering requirements as hgc_set_condition, just the
+ * opposite sense.
+ *
+ * Deliberately does NOT take an `enclosing` guard. The word this writes is
+ * consumed as the *condition* of the else region's hipGraphCondBegin, and that
+ * region's seed (hgc_set_condition above) performs the conjunction. ANDing here
+ * as well would be redundant, and ANDing here INSTEAD would be wrong: the
+ * complement must stay a faithful !cond so the two branches remain exclusive. */
+__global__ void hgc_write_complement(unsigned int* slot, const int* condition)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        const int v = __atomic_load_n(condition, __ATOMIC_RELAXED);
+        __atomic_store_n(slot, (v != 0) ? 0u : 1u, __ATOMIC_RELEASE);
     }
 }
 
@@ -124,8 +167,25 @@ struct hipGraphCondHandle_st {
     hipGraph_t graph = nullptr;
     unsigned int* slot = nullptr; /* device: 0 = stop, 1 = continue */
     unsigned int slotIndex = 0u; /* index into the slab, for release */
+
+    /* Which device's slab `slot` points into. Recorded at creation because
+     * HandleDestroy may well run with a different device current -- Warp tears
+     * handles down on error paths that have already switched context -- and
+     * returning the slot to the wrong device's free list would hand a device-0
+     * address to a device-1 handle, which is exactly the fault this field exists
+     * to prevent. */
+    int device = 0;
     unsigned int defaultValue = 1u;
     unsigned int flags = 0u;
+
+    /* Guard word of the region lexically enclosing this one, or null at top
+     * level. Every seed that writes `slot` ANDs with it -- see hgc_set_condition
+     * for why, and hipGraphCondSetEnclosingGuard for how it is supplied.
+     *
+     * Lives on the HANDLE rather than only on the open CondRegion because
+     * spliceBody emits refresh seeds between unroll copies, long after the
+     * region's Begin has been consumed, and those need the same conjunction. */
+    const unsigned int* enclosingGuard = nullptr;
 
     /* How many times this handle's slot has been baked into a graph.
      *
@@ -188,6 +248,20 @@ unsigned int* handleSlotChecked(hipGraphCondHandle h)
     return handleValidLocked(h) ? h->slot : nullptr;
 }
 
+/* Same contract, for the callers that launch a seed kernel: they need the slot
+ * and the enclosing guard together, and reading them in two critical sections
+ * would let a SetEnclosingGuard land between the two and seed a node with a
+ * slot from one region and a guard from another. Returns nullptr on an invalid
+ * handle; *enclosing_out is only written on success. */
+unsigned int* handleSeedArgsChecked(hipGraphCondHandle h, const unsigned int** enclosing_out)
+{
+    std::lock_guard<std::mutex> lk(g_lock);
+    if (!handleValidLocked(h))
+        return nullptr;
+    *enclosing_out = h->enclosingGuard;
+    return h->slot;
+}
+
 }  // namespace
 
 /* --- condition slot pool -------------------------------------------------
@@ -211,40 +285,80 @@ struct SlotPool {
     unsigned int* base = nullptr;
     unsigned int capacity = 0;
     unsigned int used = 0; /* high-water mark of never-yet-handed-out slots */
+
+    /* Slots whose handle was destroyed WITHOUT ever being spliced into a graph.
+     *
+     * Only never-spliced slots land here -- see hipGraphCondHandle_st::splices.
+     * Recycling a spliced slot would hand a live graph's condition word to a new
+     * handle, which is a silent wrong-answer bug and strictly worse than running
+     * out of slots.
+     *
+     * Without any recycling, a long-running process that captures repeatedly
+     * burns one slot per capture and eventually exhausts the slab. It used to
+     * "work" because HandleDestroy freed the slab out from under the pool, which
+     * is the bug this replaces. */
+    std::vector<unsigned int> freeSlots;
+
+    /* Slots that have been spliced into a graph and can never be reissued, even
+     * after their handle is destroyed. The slab cannot be freed while this is
+     * non-zero: an instantiated exec may still write through those addresses,
+     * and nothing in HIP tells us when it stops. */
+    unsigned int retiredSlots = 0;
 };
-SlotPool g_pool;
 
-/* Slots whose handle was destroyed WITHOUT ever being spliced into a graph.
+/* ONE SLAB PER DEVICE, keyed by HIP device ordinal.
  *
- * Only never-spliced slots land here -- see hipGraphCondHandle_st::splices.
- * Recycling a spliced slot would hand a live graph's condition word to a new
- * handle, which is a silent wrong-answer bug and strictly worse than running
- * out of slots.
+ * This was a single process-global SlotPool, and that was a fault rather than an
+ * untidiness. The slab is allocated on whichever device happened to be current at
+ * the first reserve, and a plain hipMalloc'd address is not dereferenceable from
+ * another device unless peer access has been enabled explicitly. So a handle
+ * created on device 1 received a device-0 interior pointer, and the first store a
+ * seed kernel made through it faulted -- "Memory access fault by GPU node-3 ...
+ * Reason: Unknown", measured on a two-GPU MI300X node with test_complex_capture
+ * on cuda:1 while cuda:0 merely returned a wrong answer.
  *
- * Without any recycling, a long-running process that captures repeatedly burns
- * one slot per capture and eventually exhausts the slab. It used to "work"
- * because HandleDestroy freed the slab out from under the pool, which is the
- * bug this replaces. */
-std::vector<unsigned int> g_freeSlots;
+ * Keying by device also puts the LAZY reserve on the right device. Warp calls
+ * hipGraphCondPoolReserve from wp_cuda_graph_begin_capture under a ContextGuard,
+ * so the first capture on each device warms that device's slab at the last point
+ * in the flow that is still outside a capture -- which is the only point where
+ * allocating is legal at all (see the header comment above). Without per-device
+ * keying, the second device found a non-null base, skipped the reserve entirely,
+ * and never got a slab of its own. */
+std::unordered_map<int, SlotPool> g_pools;
 
-/* Slots that have been spliced into a graph and can never be reissued, even
- * after their handle is destroyed. The slab cannot be freed while this is
- * non-zero: an instantiated exec may still write through those addresses, and
- * nothing in HIP tells us when it stops. */
-unsigned int g_retiredSlots = 0;
+/* Caller must hold g_lock.
+ *
+ * Every pool operation is relative to the calling thread's current device, which
+ * is what HIP itself uses to decide where an allocation lands.
+ *
+ * On failure the error is propagated -- every caller returns on it. *device_out is
+ * still set to 0 so a caller that chooses to ignore the error cannot go on to index
+ * g_pools with an uninitialised value; it is not a fallback that makes the
+ * operation succeed. hipGetDevice failing at all means the runtime is unusable. */
+hipError_t currentDeviceLocked(int* device_out)
+{
+    hipError_t err = hipGetDevice(device_out);
+    if (err != hipSuccess) {
+        HGC_LOG("hipGetDevice failed: %d (%s); assuming device 0", (int)err, hipGetErrorString(err));
+        *device_out = 0;
+    }
+    return err;
+}
 
 /* Caller must hold g_lock. */
-hipError_t poolReserveLocked(unsigned int slots)
+hipError_t poolReserveLocked(SlotPool& pool, int device, unsigned int slots)
 {
-    if (g_pool.base && g_pool.capacity >= slots)
+    if (pool.base && pool.capacity >= slots)
         return hipSuccess;
-    if (g_pool.base) {
+    if (pool.base) {
         /* Never move a live slab: outstanding handles hold interior pointers
          * into it. Report the shortfall rather than silently under-serving --
          * the old code returned hipSuccess here, so a caller asking for 256
          * slots after a default 64-slot slab existed was told "fine" and then
          * ran out mid-capture. */
-        HGC_LOG("pool already live with %u slots; request for %u not honoured", g_pool.capacity, slots);
+        HGC_LOG(
+            "device %d pool already live with %u slots; request for %u not honoured", device, pool.capacity, slots
+        );
         return hipErrorOutOfMemory;
     }
 
@@ -256,7 +370,7 @@ hipError_t poolReserveLocked(unsigned int slots)
      * fall back rather than fail. */
     hipError_t err = hipExtMallocWithFlags(reinterpret_cast<void**>(&base), bytes, hipDeviceMallocUncached);
     if (err != hipSuccess) {
-        HGC_LOG("hipExtMallocWithFlags(%zu) -> %d, falling back to hipMalloc", bytes, (int)err);
+        HGC_LOG("device %d hipExtMallocWithFlags(%zu) -> %d, falling back to hipMalloc", device, bytes, (int)err);
         err = hipMalloc(&base, bytes);
         /* Drain the error the tolerated attempt latched on this thread.
          *
@@ -269,7 +383,7 @@ hipError_t poolReserveLocked(unsigned int slots)
         (void)hipGetLastError();
     }
     if (err != hipSuccess) {
-        HGC_LOG("pool reserve of %u slots FAILED: %d (%s)", slots, (int)err, hipGetErrorString(err));
+        HGC_LOG("device %d pool reserve of %u slots FAILED: %d (%s)", device, slots, (int)err, hipGetErrorString(err));
         return err;
     }
 
@@ -279,11 +393,11 @@ hipError_t poolReserveLocked(unsigned int slots)
         return err;
     }
 
-    g_pool.base = base;
-    g_pool.capacity = slots;
-    g_pool.used = 0;
-    g_freeSlots.clear();
-    HGC_LOG("pool reserved: %u slots at %p", slots, (void*)base);
+    pool.base = base;
+    pool.capacity = slots;
+    pool.used = 0;
+    pool.freeSlots.clear();
+    HGC_LOG("device %d pool reserved: %u slots at %p", device, slots, (void*)base);
     return hipSuccess;
 }
 }  // namespace
@@ -542,23 +656,31 @@ extern "C" hipError_t hipGraphCondHandleCreate(
 
     std::lock_guard<std::mutex> lk(g_lock);
 
+    /* The slot must live on the device whose kernels will dereference it, and
+     * that device is the current one -- Warp opens the region from a stream it
+     * has already made current via ContextGuard. */
+    int device = 0;
+    if (hipError_t err = currentDeviceLocked(&device); err != hipSuccess)
+        return err;
+    SlotPool& pool = g_pools[device];
+
     /* Grow the pool only when it is safe to allocate, i.e. not mid-capture. */
-    if (!g_pool.base) {
-        hipError_t err = poolReserveLocked(kDefaultPoolSlots);
+    if (!pool.base) {
+        hipError_t err = poolReserveLocked(pool, device, kDefaultPoolSlots);
         if (err != hipSuccess)
             return err;
     }
     /* Prefer a recycled slot; only then extend the high-water mark.
      *
-     * Everything in g_freeSlots is a NEVER-SPLICED slot (HandleDestroy only
+     * Everything in pool.freeSlots is a NEVER-SPLICED slot (HandleDestroy only
      * pushes those), so reissuing one cannot alias a live graph. Slots that
-     * were spliced are counted in g_retiredSlots and never come back. */
+     * were spliced are counted in pool.retiredSlots and never come back. */
     unsigned int index = 0;
-    if (!g_freeSlots.empty()) {
-        index = g_freeSlots.back();
-        g_freeSlots.pop_back();
-    } else if (g_pool.used < g_pool.capacity) {
-        index = g_pool.used++;
+    if (!pool.freeSlots.empty()) {
+        index = pool.freeSlots.back();
+        pool.freeSlots.pop_back();
+    } else if (pool.used < pool.capacity) {
+        index = pool.used++;
     } else {
         /* Exhausted, and we cannot grow during a capture. Tell the caller to
          * reserve more up front instead of silently breaking their capture.
@@ -568,23 +690,24 @@ extern "C" hipError_t hipGraphCondHandleCreate(
          * (size the pool for TOTAL captures) rather than by leaked handles
          * (a bug to go fix). */
         HGC_LOG(
-            "condition-slot pool exhausted (%u/%u used, 0 free, %u retired "
-            "to live graphs); call hipGraphCondPoolReserve() with a larger "
-            "bound before capture",
-            g_pool.used, g_pool.capacity, g_retiredSlots
+            "device %d condition-slot pool exhausted (%u/%u used, 0 free, %u "
+            "retired to live graphs); call hipGraphCondPoolReserve() with a "
+            "larger bound before capture",
+            device, pool.used, pool.capacity, pool.retiredSlots
         );
         return hipErrorOutOfMemory;
     }
 
     auto* h = new (std::nothrow) hipGraphCondHandle_st();
     if (!h) {
-        g_freeSlots.push_back(index);
+        pool.freeSlots.push_back(index);
         return hipErrorOutOfMemory;
     }
 
     h->graph = graph;
     h->slotIndex = index;
-    h->slot = g_pool.base + index;
+    h->device = device;
+    h->slot = pool.base + index;
     h->defaultValue = (defaultValue == hipGraphCondAssignZero) ? 0u : 1u;
     h->flags = flags;
     g_liveHandleSet.insert(h);
@@ -611,18 +734,31 @@ extern "C" hipError_t hipGraphCondPoolReserve(unsigned int slots)
     if (slots == 0)
         return hipErrorInvalidValue;
     std::lock_guard<std::mutex> lk(g_lock);
-    return poolReserveLocked(slots);
+    /* Reserves for the CURRENT device only -- slabs are per-device, so a
+     * multi-GPU caller must call this once per device, each time with that
+     * device current. Warp gets this for free: it reserves from
+     * wp_cuda_graph_begin_capture, under a ContextGuard, so the first capture on
+     * each device warms that device's slab. */
+    int device = 0;
+    if (hipError_t err = currentDeviceLocked(&device); err != hipSuccess)
+        return err;
+    return poolReserveLocked(g_pools[device], device, slots);
 }
 
 extern "C" hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out, unsigned int* used_out)
 {
     std::lock_guard<std::mutex> lk(g_lock);
+    /* Reports the CURRENT device's slab, matching hipGraphCondPoolReserve. */
+    int device = 0;
+    if (hipError_t err = currentDeviceLocked(&device); err != hipSuccess)
+        return err;
+    const SlotPool& pool = g_pools[device];
     if (capacity_out)
-        *capacity_out = g_pool.base ? g_pool.capacity : 0u;
+        *capacity_out = pool.base ? pool.capacity : 0u;
     /* UNAVAILABLE slots, not the high-water mark and not the live-handle count.
      *
-     * g_pool.used only ever grows; slots handed back by HandleDestroy sit in
-     * g_freeSlots and are genuinely available. Reporting the high-water mark
+     * pool.used only ever grows; slots handed back by HandleDestroy sit in
+     * pool.freeSlots and are genuinely available. Reporting the high-water mark
      * made a pool with free slots look exhausted, and the Warp shim then
      * refused a capture that would have succeeded.
      *
@@ -632,7 +768,7 @@ extern "C" hipError_t hipGraphCondPoolStatus(unsigned int* capacity_out, unsigne
      * hipErrorOutOfMemory", which is what the shim's pre-check needs, and it
      * agrees with the exhaustion log in HandleCreate. */
     if (used_out)
-        *used_out = g_pool.base ? g_pool.used - static_cast<unsigned int>(g_freeSlots.size()) : 0u;
+        *used_out = pool.base ? pool.used - static_cast<unsigned int>(pool.freeSlots.size()) : 0u;
     return hipSuccess;
 }
 
@@ -647,11 +783,11 @@ extern "C" hipError_t hipGraphCondHandleDestroy(hipGraphCondHandle handle)
      * context that followed it. The slot is NOT an allocation -- it is an
      * interior pointer into the slab reserved by poolReserveLocked:
      *
-     *     h->slot = g_pool.base + g_pool.used++;
+     *     h->slot = pool.base + pool.used++;
      *
-     * so the first handle's slot aliases g_pool.base exactly. Freeing it
-     * returns the ENTIRE 64/256-slot slab to the allocator while g_pool.base
-     * still points at it and g_pool.capacity still says it is live. Every
+     * so the first handle's slot aliases pool.base exactly. Freeing it
+     * returns the ENTIRE 64/256-slot slab to the allocator while pool.base
+     * still points at it and pool.capacity still says it is live. Every
      * subsequent hipGraphCondHandleCreate hands out a pointer into freed device
      * memory, poolReserveLocked refuses to re-reserve ("never move a live
      * slab"), and the condition kernels then write through a dangling device
@@ -707,15 +843,19 @@ extern "C" hipError_t hipGraphCondHandleDestroy(hipGraphCondHandle handle)
          * A never-spliced handle (a probe, an aborted capture, an error unwind)
          * is referenced by nothing, so its slot goes straight back. That is what
          * keeps a repeated capture/abort loop from exhausting the slab. */
-        if (g_pool.base && handle->slotIndex < g_pool.capacity) {
+        /* Back to the slab it actually came from, not the current device's --
+         * see hipGraphCondHandle_st::device. */
+        auto pool_it = g_pools.find(handle->device);
+        if (pool_it != g_pools.end() && pool_it->second.base && handle->slotIndex < pool_it->second.capacity) {
+            SlotPool& pool = pool_it->second;
             if (handle->splices == 0u) {
-                g_freeSlots.push_back(handle->slotIndex);
+                pool.freeSlots.push_back(handle->slotIndex);
             } else {
-                ++g_retiredSlots;
+                ++pool.retiredSlots;
                 HGC_LOG(
-                    "slot %u retired: spliced into %u graph(s), cannot be "
-                    "reissued",
-                    handle->slotIndex, handle->splices
+                    "device %d slot %u retired: spliced into %u graph(s), "
+                    "cannot be reissued",
+                    handle->device, handle->slotIndex, handle->splices
                 );
             }
         }
@@ -740,7 +880,7 @@ extern "C" hipError_t hipGraphCondHandleDestroy(hipGraphCondHandle handle)
  * dangling-device-pointer fault this whole change exists to remove.
  *
  * Since HIP offers no way to learn that a hipGraphExec_t has been destroyed,
- * `g_retiredSlots != 0` is a one-way latch: once any slot has been spliced,
+ * `retiredSlots != 0` on any device is a one-way latch: once a slot has been spliced,
  * the slab is pinned for the life of the process. That is deliberately
  * conservative -- the alternative is a silent memory fault -- and it is why
  * the error message tells the caller what would have to be true instead.
@@ -750,27 +890,43 @@ extern "C" hipError_t hipGraphCondHandleDestroy(hipGraphCondHandle handle)
 extern "C" hipError_t hipGraphCondPoolRelease(void)
 {
     std::lock_guard<std::mutex> lk(g_lock);
-    if (!g_pool.base)
-        return hipSuccess;
 
+    /* Releases EVERY device's slab, unlike Reserve/Status which act on the
+     * current one. Those two are per-device because the caller is asking about
+     * the device it is about to capture on; this is teardown, and a release that
+     * silently left another device's slab allocated would be a leak nobody has a
+     * second call to fix -- the caller would have to know which devices were
+     * ever touched, which is precisely what this file knows and they do not.
+     *
+     * All-or-nothing: the refusal conditions below are checked across all
+     * devices before anything is freed, so a partial release cannot leave the
+     * bookkeeping describing memory that is already gone. */
     const unsigned int live = liveHandleCountLocked();
     if (live != 0 || !g_regions.empty()) {
         HGC_LOG("PoolRelease refused: %u live handle(s), %zu open region(s)", live, g_regions.size());
         return hipErrorIllegalState;
     }
-    if (g_retiredSlots != 0) {
-        HGC_LOG(
-            "PoolRelease refused: %u slot(s) are spliced into graphs that "
-            "may still be instantiated. HIP cannot report when a "
-            "hipGraphExec_t is destroyed, so the slab stays reserved for "
-            "the life of the process once any capture has used it.",
-            g_retiredSlots
-        );
-        return hipErrorIllegalState;
+    for (const auto& kv : g_pools) {
+        if (kv.second.retiredSlots != 0) {
+            HGC_LOG(
+                "PoolRelease refused: %u slot(s) on device %d are spliced into "
+                "graphs that may still be instantiated. HIP cannot report when "
+                "a hipGraphExec_t is destroyed, so the slab stays reserved for "
+                "the life of the process once any capture has used it.",
+                kv.second.retiredSlots, kv.first
+            );
+            return hipErrorIllegalState;
+        }
     }
-    HGC_TRY(hipFree(g_pool.base));
-    g_pool = SlotPool {};
-    g_freeSlots.clear();
+
+    /* hipFree is device-agnostic for an address the runtime owns, so no device
+     * switch is needed here -- and switching would be worse, because it would
+     * leave the caller's current device changed on an error return. */
+    for (auto& kv : g_pools) {
+        if (kv.second.base)
+            HGC_TRY(hipFree(kv.second.base));
+    }
+    g_pools.clear();
     return hipSuccess;
 }
 
@@ -800,6 +956,30 @@ extern "C" hipError_t hipGraphCondSetGuard(hipGraphCondHandle handle, unsigned i
     return hipSuccess;
 }
 
+/* Record the guard of the lexically enclosing region on this handle.
+ *
+ * Must be called BEFORE hipGraphCondBegin, because Begin emits the seed that
+ * consumes it. `enclosing` may be null, which means "this region is at the top
+ * level" and disables the conjunction. See hgc_set_condition for the failure
+ * this prevents.
+ *
+ * Deliberately a property of the HANDLE and not a parameter of Begin: the same
+ * value is needed again by spliceBody's inter-copy refresh seeds, which run
+ * after the region has been consumed, and Begin's signature is shared with the
+ * while-loop path. */
+extern "C" hipError_t hipGraphCondSetEnclosingGuard(hipGraphCondHandle handle, const unsigned int* enclosing)
+{
+    /* Validate and assign in ONE critical section, for the reason spelled out
+     * above handleSlotChecked. */
+    std::lock_guard<std::mutex> lk(g_lock);
+    if (!handleValidLocked(handle)) {
+        HGC_LOG("SetEnclosingGuard on invalid handle %p", (void*)handle);
+        return hipErrorInvalidValue;
+    }
+    handle->enclosingGuard = enclosing;
+    return hipSuccess;
+}
+
 /* ---------------------------------------------------------------------------
  * Condition update
  * ------------------------------------------------------------------------ */
@@ -811,13 +991,40 @@ extern "C" hipError_t hipGraphCondSetCondition(hipStream_t stream, hipGraphCondH
     /* This is the launch that used to run with a dangling slot pointer once
      * HandleDestroy had freed the slab. A destroyed handle is now caught here
      * instead of faulting inside the kernel. */
-    unsigned int* slot = handleSlotChecked(handle);
+    const unsigned int* enclosing = nullptr;
+    unsigned int* slot = handleSeedArgsChecked(handle, &enclosing);
     if (!slot) {
         HGC_LOG("SetCondition on invalid handle %p", (void*)handle);
         return hipErrorInvalidValue;
     }
-    hipLaunchKernelGGL(hgc_set_condition, dim3(1), dim3(1), 0, stream, slot, condition);
+    hipLaunchKernelGGL(hgc_set_condition, dim3(1), dim3(1), 0, stream, slot, condition, enclosing);
     return hipGetLastError();
+}
+
+extern "C" hipError_t hipGraphCondWriteComplement(hipStream_t stream, hipGraphCondHandle handle, const int* condition)
+{
+    if (!condition)
+        return hipErrorInvalidValue;
+    unsigned int* slot = handleSlotChecked(handle);
+    if (!slot) {
+        HGC_LOG("WriteComplement on invalid handle %p", (void*)handle);
+        return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(hgc_write_complement, dim3(1), dim3(1), 0, stream, slot, condition);
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess)
+        return err;
+
+    /* Retire the slot, for the same reason hipGraphCondBegin does: the launch
+     * above became a kernel node in the caller's graph holding this address as
+     * a raw device pointer, and that node outlives the handle. Unlike
+     * SetCondition -- which is only ever called on a handle already inside a
+     * region, and so already retired -- this is the ONLY point at which a
+     * complement handle's address escapes into a graph. Without the bump the
+     * slot goes back on the free list at HandleDestroy and a later region
+     * aliases a word this graph still writes on every replay. */
+    ++handle->splices;
+    return hipSuccess;
 }
 
 /* ---------------------------------------------------------------------------
@@ -921,7 +1128,10 @@ extern "C" hipError_t hipGraphCondBegin(
      * capture (the 906 case) sailed on and only surfaced as a crash later.
      * Safe to attribute to this launch only because of the drain above. */
     HGC_TRY(hipGetLastError());
-    hipLaunchKernelGGL(hgc_set_condition, dim3(1), dim3(1), 0, stream, handle->slot, condition);
+    /* handle->enclosingGuard is read under g_lock, which this function already
+     * holds. It is null unless the caller parked one with
+     * hipGraphCondSetEnclosingGuard, so a top-level region is unchanged. */
+    hipLaunchKernelGGL(hgc_set_condition, dim3(1), dim3(1), 0, stream, handle->slot, condition, handle->enclosingGuard);
     HGC_TRY(hipGetLastError());
 
     /* The slot is NOW baked into the caller's graph, so retire it here.
@@ -1078,7 +1288,13 @@ hipError_t spliceBody(hipStream_t stream, CondRegion& region, hipGraph_t bodyGra
 
         hipKernelNodeParams kp;
         std::memset(&kp, 0, sizeof(kp));
-        void* args[2] = { &region.handle->slot, &region.condition };
+        /* Same conjunction as Begin's seed. Without it, a while-region nested
+         * inside a suppressed if-branch re-arms its guard here on every copy,
+         * straight from the user's untouched condition array, and runs the full
+         * unroll inside a branch that was not taken. hipGraphAddKernelNode
+         * copies the pointed-to values immediately, so these addresses need only
+         * outlive this call. */
+        void* args[3] = { &region.handle->slot, &region.condition, &region.handle->enclosingGuard };
         kp.func = reinterpret_cast<void*>(hgc_set_condition);
         kp.gridDim = dim3(1);
         kp.blockDim = dim3(1);

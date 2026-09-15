@@ -885,6 +885,35 @@ static bool apic_replay_ops_into_cuda_capture(
                 break;
             }
 
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+            // Refuse, because the alternative here is a silently wrong answer.
+            //
+            // HIP has no conditional graph node: a branch is spliced into the
+            // parent and skips itself only when its kernels test the region's
+            // guard word. The launches below go through the same path as every
+            // other APIC replay, which supplies a NULL guard (see the comment at
+            // the hidden trailing parameter above) -- APIC records only the
+            // kernel's declared Warp args, so there is no recorded slot to bind a
+            // guard into. A null guard means "run normally", so both branches
+            // would execute.
+            //
+            // Binding the real guard needs the branch's slot threaded down
+            // through apic_replay_ops_into_cuda_capture into every nested launch.
+            // Until that exists, a live wp.capture_if() is the supported path on
+            // HIP -- context.py binds the guard there.
+            (void)branch_a;
+            (void)branch_b;
+            wp::set_error_string(
+                "Warp APIC error: replaying a recorded wp.capture_if() is not supported on HIP/ROCm (op %u). ROCm has "
+                "no conditional graph node, so a branch is predicated by a guard word its kernels read, and APIC "
+                "replay has no recorded parameter to bind that guard into -- both branches would run. Use "
+                "wp.capture_if() directly inside the capture instead of replaying it through APIC.",
+                i
+            );
+            success = false;
+            break;
+#else
+
             // Insert the conditional node(s), then populate each branch body by
             // redirecting the same stream's capture into it -- the exact mechanism
             // the live capture_if uses (pause the outer capture, resume into the
@@ -914,7 +943,7 @@ static bool apic_replay_ops_into_cuda_capture(
                         graph, stream, branch_a, rec->branch_a_size, rec->branch_a_op_count, arch, use_ptx
                     )
                     || !wp_cuda_graph_pause_capture(graph->cuda_context, (void*)stream, &tmp)
-                    || !wp_cuda_graph_check_conditional_body(graph_on_true)) {
+                    || !wp_cuda_graph_check_conditional_if_body(graph_on_true)) {
                     success = false;
                 }
             }
@@ -924,7 +953,7 @@ static bool apic_replay_ops_into_cuda_capture(
                         graph, stream, branch_b, rec->branch_b_size, rec->branch_b_op_count, arch, use_ptx
                     )
                     || !wp_cuda_graph_pause_capture(graph->cuda_context, (void*)stream, &tmp)
-                    || !wp_cuda_graph_check_conditional_body(graph_on_false)) {
+                    || !wp_cuda_graph_check_conditional_if_body(graph_on_false)) {
                     success = false;
                 }
             }
@@ -933,7 +962,9 @@ static bool apic_replay_ops_into_cuda_capture(
             // capturing stream to close, even on a mid-branch failure.
             if (!wp_cuda_graph_resume_capture(graph->cuda_context, (void*)stream, outer_graph))
                 success = false;
+
             break;
+#endif  // WP_ENABLE_HIP
         }
 
         case APIC_OP_WHILE: {

@@ -775,6 +775,19 @@ WP_API bool wp_capture_debug_dot_print(void* graph, const char* path, uint32_t f
 WP_API bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret
 );
+// Device guard word for each branch of a pending if/else pair, and the call that
+// splices both branch bodies into the parent graph.
+//
+// Both are HIP-only in substance. On HIP wp_cuda_graph_insert_if_else opens no
+// region at all -- it hands back two empty graphs -- so the conditional regions
+// are emitted later, by wp_cuda_graph_splice_if_else, once both bodies are
+// complete and the parent capture has been resumed. Each branch is predicated on
+// its own guard word, which its kernels must test (see hip_graph_cond.h).
+//
+// On CUDA the conditional node does the work: the guards come back null and the
+// splice is a no-op, so the caller's sequence is the same on both backends.
+WP_API bool wp_cuda_graph_get_if_else_guards(void* stream, void** if_guard_ret, void** else_guard_ret);
+WP_API bool wp_cuda_graph_splice_if_else(void* context, void* stream);
 WP_API bool wp_cuda_graph_insert_while(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** body_graph_ret, uint64_t* handle_ret
 );
@@ -786,10 +799,31 @@ wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx,
 // CUDA, where a conditional node makes the test unnecessary. Must be called while
 // the handle is live, i.e. before wp_cuda_graph_set_condition.
 WP_API bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_ret);
+// Declare which region encloses the next conditional region opened on this stream,
+// by passing that region's guard word (from wp_cuda_graph_get_conditional_guard or
+// wp_cuda_graph_get_if_else_guards). Pass NULL at the top level.
+//
+// HIP only, and required for correctness rather than speed: the HIP lowering
+// predicates body kernels but not the seed kernels that write the guards, so a
+// nested region's cloned seed re-arms its guard even inside a branch that was not
+// taken, and the nested body runs anyway. See hip_graph_cond.h for the measurement.
+// A no-op on CUDA, where a conditional node's body is genuinely not scheduled.
+//
+// Must be called before wp_cuda_graph_insert_while / wp_cuda_graph_insert_if_else;
+// the value is parked per stream and consumed by the next one to open.
+WP_API bool wp_cuda_graph_set_enclosing_guard(void* stream, void* guard);
 WP_API bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret);
 WP_API bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph);
 WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_graph);
 WP_API bool wp_cuda_graph_check_conditional_body(void* body_graph);
+// The same check, tightened for an if/else branch body.
+//
+// What is a warning for a while body is an error here. A non-kernel node in a
+// while body costs wasted iterations; the same node in a branch body executes a
+// side effect of the branch the condition selected AGAINST, and nothing
+// downstream can tell that happened. Returns false and sets the Warp error
+// string when it finds one.
+WP_API bool wp_cuda_graph_check_conditional_if_body(void* body_graph);
 // Count the kernel nodes in a graph, recursing into child graphs. HIP only in
 // practice: the predicated unroll can only skip a kernel node whose source Warp
 // generated, so comparing this against the number of Warp launches recorded in

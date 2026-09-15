@@ -15,10 +15,16 @@ from warp.tests.unittest_utils import *
 # driver once.
 _HIP_BACKEND = any(d.is_hip for d in wp.get_cuda_devices())
 
-# wp.capture_if() has no lowering inside a graph capture on HIP: the static-unroll
-# fallback would run the branch the condition selected against instead of skipping
-# it, so the native layer refuses rather than return a wrong answer.
-CONDITIONAL_IF_SUPPORTED = wp.is_conditional_graph_supported() and not _HIP_BACKEND
+CONDITIONAL_IF_SUPPORTED = wp.is_conditional_graph_supported()
+
+# On HIP a branch is predicated by a guard word its kernels read, so a branch passed
+# as an already-captured Graph cannot work: its kernel nodes were recorded outside the
+# region with a null guard baked into their parameter blocks, and a graph node's params
+# cannot be rebound at splice time. capture_if raises NotImplementedError there rather
+# than run the branch the condition selected against, so the Graph-branch variants of
+# the functional tests below do not apply. The two _subgraph error tests still run --
+# they assert that the refusal happens, only with a different message.
+CONDITIONAL_IF_GRAPH_BRANCH = wp.is_conditional_graph_supported() and not _HIP_BACKEND
 
 # wp.capture_while() on HIP is lowered as a predicated static unroll: the body is
 # cloned into the parent graph a fixed number of times with a device-side refresh
@@ -175,7 +181,7 @@ def test_if_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_GRAPH_BRANCH, "Conditional if/else graph nodes with a Graph branch not supported")
 def test_if_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -295,7 +301,7 @@ def test_if_else_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_GRAPH_BRANCH, "Conditional if/else graph nodes with a Graph branch not supported")
 def test_if_else_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -425,7 +431,7 @@ def test_else_capture(test, device):
             np.testing.assert_array_equal(array.numpy(), expected)
 
 
-@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_GRAPH_BRANCH, "Conditional if/else graph nodes with a Graph branch not supported")
 def test_else_capture_with_subgraph(test, device):
     assert device.is_cuda
 
@@ -737,7 +743,7 @@ def test_complex_capture(test, device):
                         np.testing.assert_array_equal(array.numpy(), base)
 
 
-@unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
+@unittest.skipUnless(CONDITIONAL_IF_GRAPH_BRANCH, "Conditional if/else graph nodes with a Graph branch not supported")
 def test_complex_capture_with_subgraphs(test, device):
     assert device.is_cuda
 
@@ -1109,6 +1115,16 @@ def test_error_alloc_while(test, device):
                 wp.capture_while(condition=cond, while_body=body_with_alloc)
 
 
+# Same split as test_error_alloc_while_subgraph below: a Graph branch that cannot be
+# lowered is rejected either way, but on HIP the reason is reached first and is broader
+# -- a Graph branch is refused outright, allocation or not, because its kernel nodes
+# cannot be bound to the branch's guard word.
+if CONDITIONAL_IF_GRAPH_BRANCH:
+    _ALLOC_SUBGRAPH_ERROR = r"Child graph contains an unsupported operation \(memory allocation\)"
+else:
+    _ALLOC_SUBGRAPH_ERROR = r"capture_if\(\) with a Graph branch is not supported on HIP"
+
+
 @unittest.skipUnless(CONDITIONAL_IF_SUPPORTED, "Conditional if/else graph nodes not supported")
 def test_error_alloc_if_subgraph(test, device):
     with wp.ScopedDevice(device):
@@ -1117,9 +1133,7 @@ def test_error_alloc_if_subgraph(test, device):
             body_with_alloc()
 
         cond = wp.ones(1, dtype=wp.int32)
-        with test.assertRaisesRegex(
-            RuntimeError, r"Child graph contains an unsupported operation \(memory allocation\)"
-        ):
+        with test.assertRaisesRegex(RuntimeError, _ALLOC_SUBGRAPH_ERROR):
             with wp.ScopedCapture():
                 wp.capture_if(condition=cond, on_true=body_capture.graph)
 
@@ -1132,9 +1146,7 @@ def test_error_alloc_else_subgraph(test, device):
             body_with_alloc()
 
         cond = wp.ones(1, dtype=wp.int32)
-        with test.assertRaisesRegex(
-            RuntimeError, r"Child graph contains an unsupported operation \(memory allocation\)"
-        ):
+        with test.assertRaisesRegex(RuntimeError, _ALLOC_SUBGRAPH_ERROR):
             with wp.ScopedCapture():
                 wp.capture_if(condition=cond, on_false=body_capture.graph)
 

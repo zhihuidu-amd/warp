@@ -4318,17 +4318,26 @@ bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph)
 // https://developer.nvidia.com/blog/dynamic-control-flow-in-cuda-graphs-with-conditional-nodes/
 // condition is a gpu pointer
 // if_graph_ret and else_graph_ret should be NULL if not needed
-// HIP: this refuses instead of lowering. hipgraph_cond does expose the if form
-// (hipGraphCondTypeIf) and wiring it would be the same shape as insert_while
-// below, but the lowering underneath is a predicated static unroll that clones
-// the body into the parent verbatim -- hipgraph_cond.cu::cloneGraphInto copies
-// kernel node params and injects nothing, so a body only skips work if its own
-// kernels read the guard word (hipGraphCondSetGuard), which Warp bodies do not.
-// A while-body that ignores the guard costs extra iterations of an already
-// converged loop; an if/else body that ignores it EXECUTES THE BRANCH THE
-// CONDITION SELECTED AGAINST. Same mechanism, wrong answer instead of wasted
-// work, so this fails loudly rather than returning a graph that takes both
-// branches. See the HIP branch below.
+// HIP takes a different route to the same contract, for a reason worth knowing
+// before editing either side. CUDA can hand back both body graphs here because
+// one conditional node carries two of them. hipGraphCondBegin opens exactly one
+// region on a stream, so two cannot be open at once -- and this call has to
+// return both graphs before either body exists.
+//
+// It does not need open regions to do that. wp_hip_graph_insert_if_else returns
+// two fresh empty graphs and opens nothing; the Begin/EndWithGraph pairs run
+// later, sequentially, in wp_cuda_graph_splice_if_else, once both bodies are
+// captured. context.py calls that right after it resumes the parent capture.
+//
+// The predication the HIP lowering relies on is the same guard word
+// capture_while uses: hipgraph_cond.cu::cloneGraphInto copies body nodes
+// verbatim, so a body only skips work if its kernels test the region's guard.
+// codegen.py gives every generated HIP kernel that test. What it cannot give a
+// non-kernel node, and the stake is higher here than for a while-body: an
+// unguarded node in a while-body costs iterations of a converged loop, but in an
+// if/else body it performs a side effect of the branch the condition selected
+// AGAINST. So wp_cuda_graph_check_conditional_if_body below is a hard error
+// where wp_cuda_graph_check_conditional_body is a warning.
 bool wp_cuda_graph_insert_if_else(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** if_graph_ret, void** else_graph_ret
 )
@@ -4344,19 +4353,8 @@ bool wp_cuda_graph_insert_if_else(
 #if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
     (void)arch;
     (void)use_ptx;
-    (void)condition;
-    (void)stream;
-    (void)context;
-    wp::set_error_string(
-        "wp.capture_if() is not supported inside a graph capture on HIP/ROCm. ROCm has no conditional graph node, "
-        "and Warp's HIP fallback lowers a conditional region by unrolling the body into the parent graph "
-        "unconditionally -- the body's own kernels have to test the region's guard word for the condition to have "
-        "any effect. That is tolerable for wp.capture_while(), where ignoring the guard only costs extra iterations "
-        "of an already converged loop, but not here: it would execute the branch the condition selected against. "
-        "Outside of a graph capture, wp.capture_if() works normally on HIP -- the condition is read on the host and "
-        "the selected branch runs immediately."
-    );
-    return false;
+    ContextGuard guard(context);
+    return wp_hip_graph_insert_if_else(stream, condition, if_graph_ret, else_graph_ret);
 #else
 
     ContextGuard guard(context);
@@ -4625,6 +4623,53 @@ bool wp_cuda_graph_check_conditional_body(void* body_graph)
     return true;
 }
 
+// check if a graph can be used as an if/else branch body
+//
+// On CUDA this is exactly the conditional-body check: a conditional node runs
+// the selected body and nothing else, so a branch body is no more constrained
+// than a loop body.
+//
+// On HIP it is stricter, and the difference is the whole reason this function
+// exists separately. The region is a predicated unroll -- every node is spliced
+// into the parent unconditionally and skips itself only by testing the guard
+// word, which only generated kernel nodes do. For a while-body an unguarded
+// node costs iterations of a loop that already converged. For a branch body it
+// performs a side effect of the branch the condition selected AGAINST, and
+// nothing downstream can tell. So the three node types
+// wp_cuda_graph_check_conditional_body warns about are refused here.
+bool wp_cuda_graph_check_conditional_if_body(void* body_graph)
+{
+    if (!wp_cuda_graph_check_conditional_body(body_graph))
+        return false;
+
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    size_t num_nodes = 0;
+    if (!check_cuda(cudaGraphGetNodes((cudaGraph_t)body_graph, NULL, &num_nodes)))
+        return false;
+    std::vector<cudaGraphNode_t> nodes(num_nodes);
+    if (!check_cuda(cudaGraphGetNodes((cudaGraph_t)body_graph, nodes.data(), &num_nodes)))
+        return false;
+
+    for (size_t i = 0; i < num_nodes; i++) {
+        CUgraphNodeType node_type;
+        check_cu(cuGraphNodeGetType_f(nodes[i], &node_type));
+        if (node_type == CU_GRAPH_NODE_TYPE_MEMCPY || node_type == CU_GRAPH_NODE_TYPE_MEMSET
+            || node_type == CU_GRAPH_NODE_TYPE_GRAPH) {
+            wp::set_error_string(
+                "wp.capture_if() branch contains a %s, which HIP/ROCm cannot predicate. ROCm has no conditional graph "
+                "node, so Warp splices the branch into the parent graph and each node skips itself by testing the "
+                "region's guard word -- which only Warp-generated kernels do. This operation would run even when the "
+                "condition selected the other branch. Move it out of the branch, or express it as a Warp kernel.",
+                get_graph_node_type_name(node_type)
+            );
+            return false;
+        }
+    }
+#endif  // WP_ENABLE_HIP
+
+    return true;
+}
+
 bool wp_cuda_graph_count_kernel_nodes(void* graph, uint64_t* count_ret)
 {
     if (!graph) {
@@ -4810,6 +4855,22 @@ bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_ret)
 #endif
 }
 
+bool wp_cuda_graph_set_enclosing_guard(void* stream, void* guard)
+{
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    return wp_hip_graph_set_enclosing_guard(stream, guard);
+#else
+    // CUDA needs nothing. A conditional node is a real node: when the enclosing
+    // node's condition is false its whole body -- including any nested
+    // conditional node and its seed -- is simply not scheduled. There is no
+    // cloned-seed problem to solve, so this is a no-op rather than a degraded
+    // path. See hip_graph_cond.h.
+    (void)stream;
+    (void)guard;
+    return true;
+#endif
+}
+
 bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use_ptx, int* condition, uint64_t handle)
 {
     ContextGuard guard(context);
@@ -4848,6 +4909,40 @@ bool wp_cuda_graph_set_condition(void* context, void* stream, int arch, bool use
 
     return true;
 #endif  // WP_ENABLE_HIP
+}
+
+bool wp_cuda_graph_get_if_else_guards(void* stream, void** if_guard_ret, void** else_guard_ret)
+{
+    if (if_guard_ret)
+        *if_guard_ret = nullptr;
+    if (else_guard_ret)
+        *else_guard_ret = nullptr;
+
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // HIP only, for the same reason as wp_cuda_graph_get_conditional_guard: on
+    // CUDA the unselected branch is simply not scheduled, so a null guard is the
+    // correct answer rather than a degraded one.
+    return wp_hip_graph_get_if_else_guards(stream, if_guard_ret, else_guard_ret);
+#else
+    (void)stream;
+    return true;
+#endif
+}
+
+bool wp_cuda_graph_splice_if_else(void* context, void* stream)
+{
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+    // The second half of wp_cuda_graph_insert_if_else on HIP. CUDA has no
+    // counterpart: cuGraphAddNode already put the conditional node in the parent
+    // and handed out body graphs the driver owns, so there is nothing left to
+    // splice once the bodies are captured.
+    ContextGuard guard(context);
+    return wp_hip_graph_splice_if_else(stream);
+#else
+    (void)context;
+    (void)stream;
+    return true;
+#endif
 }
 
 #else
@@ -4902,7 +4997,30 @@ bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_g
     return false;
 }
 
+bool wp_cuda_graph_get_if_else_guards(void* stream, void** if_guard_ret, void** else_guard_ret)
+{
+    // Not an error, for the same reason as wp_cuda_graph_get_conditional_guard:
+    // a null guard means "not predicated".
+    if (if_guard_ret)
+        *if_guard_ret = nullptr;
+    if (else_guard_ret)
+        *else_guard_ret = nullptr;
+    return true;
+}
+
+bool wp_cuda_graph_splice_if_else(void* context, void* stream)
+{
+    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
+    return false;
+}
+
 bool wp_cuda_graph_check_conditional_body(void* body_graph)
+{
+    wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
+    return false;
+}
+
+bool wp_cuda_graph_check_conditional_if_body(void* body_graph)
 {
     wp::set_error_string("Warp error: Warp must be built with CUDA Toolkit 12.4+ to enable conditional graph nodes");
     return false;

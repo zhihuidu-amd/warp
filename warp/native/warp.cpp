@@ -1172,6 +1172,17 @@ WP_API bool wp_cuda_graph_insert_if_else(
 {
     return false;
 }
+WP_API bool wp_cuda_graph_get_if_else_guards(void* stream, void** if_guard_ret, void** else_guard_ret)
+{
+    // Not an error: a null guard means "not predicated", which is what the CPU
+    // build wants. The call that would have created the pair already failed.
+    if (if_guard_ret)
+        *if_guard_ret = NULL;
+    if (else_guard_ret)
+        *else_guard_ret = NULL;
+    return true;
+}
+WP_API bool wp_cuda_graph_splice_if_else(void* context, void* stream) { return false; }
 WP_API bool wp_cuda_graph_insert_while(
     void* context, void* stream, int arch, bool use_ptx, int* condition, void** body_graph_ret, uint64_t* handle_ret
 )
@@ -1189,10 +1200,15 @@ WP_API bool wp_cuda_graph_get_conditional_guard(uint64_t handle, void** guard_re
         *guard_ret = NULL;
     return true;
 }
+// Succeeds with nothing to do: there is no capture on the CPU stub, so parking a
+// guard for a region that will never open is harmless, and returning false here
+// would make capture_if fail on a CPU device for a reason unrelated to it.
+WP_API bool wp_cuda_graph_set_enclosing_guard(void* stream, void* guard) { return true; }
 WP_API bool wp_cuda_graph_pause_capture(void* context, void* stream, void** graph_ret) { return false; }
 WP_API bool wp_cuda_graph_resume_capture(void* context, void* stream, void* graph) { return false; }
 WP_API bool wp_cuda_graph_insert_child_graph(void* context, void* stream, void* child_graph) { return false; }
 WP_API bool wp_cuda_graph_check_conditional_body(void* body_graph) { return false; }
+WP_API bool wp_cuda_graph_check_conditional_if_body(void* body_graph) { return false; }
 WP_API bool wp_cuda_graph_count_kernel_nodes(void* graph, uint64_t* count_ret) { return false; }
 
 WP_API void* wp_cuda_graph_insert_memcpy(void* context, void* stream, void* dst, void* src, size_t size, int kind)

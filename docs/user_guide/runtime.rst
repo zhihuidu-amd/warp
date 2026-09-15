@@ -1906,11 +1906,41 @@ condition value as a counter:
     nested inside another, because the inner region splices its own unrolled copies
     into the outer body graph and the comparison no longer means anything.
 
-    :func:`wp.capture_if <warp.capture_if>` still raises a ``RuntimeError`` inside a
-    graph capture on HIP. The predication mechanism it was waiting on now exists, but
-    selecting between two branches needs the inverse condition as well, which is
-    separate work. Outside of a capture it behaves normally, evaluating the condition
-    on the host as described above.
+    :func:`wp.capture_if <warp.capture_if>` uses the same guard, with one extra step:
+    the two branches cannot be open at the same time, because ``hipGraphCondBegin``
+    opens exactly one region per stream. Warp therefore hands back two empty graphs,
+    captures each branch body into one of them, and splices both into the parent
+    sequentially once both are complete — the if branch guarded on the condition, the
+    else branch on a device-side complement computed **before** either branch runs, so
+    an if body that writes the condition cannot change what the else branch sees.
+
+    The limits are the same three as above, but they are **errors** rather than
+    warnings. A non-predicated node in a loop body costs extra iterations; the same
+    node in a branch body executes a side effect of the branch the condition selected
+    *against*, and nothing downstream can tell that happened. So on HIP,
+    :func:`wp.capture_if <warp.capture_if>` inside a graph capture raises when a
+    branch is passed as a :class:`Graph` rather than a callable, when a branch body
+    holds a ``memcpy``, ``memset`` or child-graph node, and when a branch body holds
+    more kernel nodes than Warp bound guards to. Replaying a recorded
+    ``capture_if`` through APIC is also refused on HIP: APIC records only a kernel's
+    declared Warp arguments, so there is no recorded slot to bind the guard into and
+    both branches would run. Recording is not refused — the live capture is correct.
+
+    Conditional regions nest, and the nesting needs one more piece. A nested
+    region's seed kernels — the ones that write the inner guard word — are cloned
+    into the parent graph along with the rest of the enclosing body, and they are
+    ordinary kernel launches carrying no guard of their own. Left alone they would
+    re-arm the inner guard from the user's condition array even inside an enclosing
+    branch the outer condition suppressed, and the inner branch would run. Warp
+    therefore passes the enclosing guard down into every seed: the inner slot is set
+    to ``(*condition != 0) && (*enclosing != 0)``, with a null ``enclosing`` at the
+    outermost level read as ``1``. Each enclosing guard is itself already the
+    conjunction of its own enclosing chain, so this composes to any depth and covers
+    every combination — an ``if`` inside a ``while``, a ``while`` inside a branch,
+    and either nested in itself.
+
+    Outside of a capture, :func:`wp.capture_if <warp.capture_if>` behaves normally on
+    HIP, evaluating the condition on the host and running only the selected branch.
 
 
 .. _cpu_graphs:

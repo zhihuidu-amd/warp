@@ -7836,6 +7836,19 @@ class Runtime:
             ]
             self.core.wp_cuda_graph_insert_if_else.restype = ctypes.c_bool
 
+            self.core.wp_cuda_graph_get_if_else_guards.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            self.core.wp_cuda_graph_get_if_else_guards.restype = ctypes.c_bool
+
+            self.core.wp_cuda_graph_splice_if_else.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            self.core.wp_cuda_graph_splice_if_else.restype = ctypes.c_bool
+
             self.core.wp_cuda_graph_insert_while.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -7863,6 +7876,12 @@ class Runtime:
             ]
             self.core.wp_cuda_graph_get_conditional_guard.restype = ctypes.c_bool
 
+            self.core.wp_cuda_graph_set_enclosing_guard.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            self.core.wp_cuda_graph_set_enclosing_guard.restype = ctypes.c_bool
+
             self.core.wp_cuda_graph_pause_capture.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -7886,6 +7905,9 @@ class Runtime:
 
             self.core.wp_cuda_graph_check_conditional_body.argtypes = [ctypes.c_void_p]
             self.core.wp_cuda_graph_check_conditional_body.restype = ctypes.c_bool
+
+            self.core.wp_cuda_graph_check_conditional_if_body.argtypes = [ctypes.c_void_p]
+            self.core.wp_cuda_graph_check_conditional_if_body.restype = ctypes.c_bool
 
             self.core.wp_cuda_graph_count_kernel_nodes.argtypes = [
                 ctypes.c_void_p,
@@ -10794,6 +10816,36 @@ def _cond_guard_value() -> int | None:
     return guards[-1]
 
 
+def _set_enclosing_guard(stream) -> None:
+    """Tell the backend which conditional region encloses the next one to open.
+
+    Call immediately before ``wp_cuda_graph_insert_if_else`` or
+    ``wp_cuda_graph_insert_while``. The top of :attr:`Runtime._cond_guards` is
+    exactly the enclosing region's guard, because each region pushes and pops
+    within its own callback; an empty stack is the top level and passes ``None``.
+
+    HIP needs this to keep nested regions exclusive. The lowering there is a
+    predicated static unroll: body kernels self-skip on their guard word, but the
+    *seed* kernels that write those guards cannot themselves be predicated --
+    something has to make the first write. When a region nests, the enclosing body
+    graph is cloned into the parent along with the inner region's seeds, and those
+    clones run unconditionally, re-arming the inner guard from the user's condition
+    array even inside a branch that was not taken. Passing the enclosing guard makes
+    each seed write ``(*condition != 0) and (*enclosing != 0)`` instead, which
+    composes to any depth.
+
+    A no-op on CUDA, where a conditional node's body is genuinely not scheduled and
+    there is no cloned seed to suppress.
+
+    Not raising on failure would be the wrong trade: the consequence is a silent
+    wrong answer in an unrelated branch, not a slowdown.
+    """
+    guards = runtime._cond_guards
+    enclosing = ctypes.c_void_p(guards[-1] if guards else None)
+    if not runtime.core.wp_cuda_graph_set_enclosing_guard(stream.cuda_stream, enclosing):
+        raise RuntimeError(runtime.get_error_string())
+
+
 def _warn_unpredicated_library_dispatch(op: str) -> None:
     """Warn when a :mod:`warp._src.utils` operation is called inside a HIP conditional region.
 
@@ -10871,25 +10923,65 @@ def _warn_unguarded_body_kernels(body_graph: ctypes.c_void_p, launches: int, nes
     answer is still right if the operation is idempotent or the loop runs its full
     bound, and the same body is correct on CUDA.
     """
+    unguarded = _count_unguarded_body_kernels(body_graph, launches, nested)
+    if unguarded is not None and unguarded > 0:
+        log_warning(
+            f"The body of this conditional region contains {launches + unguarded} kernel node(s) but Warp launched "
+            f"only {launches} guarded kernel(s), so at least {unguarded} kernel(s) came from elsewhere (a native "
+            "library, a raw driver launch, or another module). On HIP the region is a predicated static unroll and "
+            "only Warp-generated kernels honor the region's guard word, so those kernels run on every unrolled copy "
+            "regardless of the condition. The result is correct only if they are idempotent or the loop runs the "
+            "full iteration bound.",
+            once=True,
+        )
+
+
+def _count_unguarded_body_kernels(body_graph: ctypes.c_void_p, launches: int, nested: bool) -> int | None:
+    """Kernel nodes in a HIP conditional body beyond the ones Warp bound a guard to.
+
+    ``None`` when the question cannot be answered -- a nested region, or a failed
+    node count -- and the caller must not treat that as zero.
+
+    Shared by :func:`_warn_unguarded_body_kernels` and
+    :func:`_check_unguarded_branch_kernels`, which differ only in what they do
+    with the number.
+    """
     if nested:
-        return
+        return None
 
     node_count = ctypes.c_uint64(0)
     if not runtime.core.wp_cuda_graph_count_kernel_nodes(body_graph, ctypes.byref(node_count)):
         # Non-fatal: this is a diagnostic, and failing it must not fail the capture.
         log_warning(f"Could not count the conditional body's kernel nodes: {runtime.get_error_string()}", once=True)
-        return
+        return None
 
-    unguarded = int(node_count.value) - launches
-    if unguarded > 0:
-        log_warning(
-            f"The body of this conditional region contains {node_count.value} kernel node(s) but Warp launched only "
+    return int(node_count.value) - launches
+
+
+def _check_unguarded_branch_kernels(branch_graph: ctypes.c_void_p, launches: int, nested: bool, branch: str) -> None:
+    """Refuse an if/else branch body holding a kernel node Warp did not generate.
+
+    The same measurement as :func:`_warn_unguarded_body_kernels`, raised rather
+    than warned, for the reason the two shapes differ. An unguarded kernel in a
+    ``capture_while`` body runs on copies the loop would not have executed --
+    wasted work, and the right answer if the kernel is idempotent. The same
+    kernel in a branch body runs when the condition selected the *other* branch,
+    which is a side effect of code the program said not to run. Nothing
+    downstream can detect that, so it cannot be a warning.
+
+    Raises :class:`RuntimeError`. A branch that opens a nested region, or a body
+    whose nodes could not be counted, is not refused -- see
+    :func:`_count_unguarded_body_kernels` for why the number is unavailable
+    there.
+    """
+    unguarded = _count_unguarded_body_kernels(branch_graph, launches, nested)
+    if unguarded is not None and unguarded > 0:
+        raise RuntimeError(
+            f"capture_if(): the {branch} branch contains {launches + unguarded} kernel node(s) but Warp launched only "
             f"{launches} guarded kernel(s), so at least {unguarded} kernel(s) came from elsewhere (a native library, "
-            "a raw driver launch, or another module). On HIP the region is a predicated static unroll and only "
-            "Warp-generated kernels honor the region's guard word, so those kernels run on every unrolled copy "
-            "regardless of the condition. The result is correct only if they are idempotent or the loop runs the "
-            "full iteration bound.",
-            once=True,
+            "a raw driver launch, or another module). On HIP a branch is predicated by a guard word its kernels read, "
+            "and only Warp-generated kernels read it, so those kernels would run even when the condition selects the "
+            "other branch. Move them out of the branch, or express them as Warp kernels."
         )
 
 
@@ -13241,9 +13333,12 @@ def is_conditional_graph_supported() -> bool:
 
     Conditional graph nodes require a CUDA driver 12.4+ and Warp to be built with CUDA Toolkit 12.4+.
 
-    On HIP devices this reports the support of :func:`warp.capture_while` only. ROCm has no
-    conditional graph node at any version, so :func:`warp.capture_if` raises inside a graph
-    capture there; see :ref:`the HIP caveat in the user guide <hip_conditional_nodes>`.
+    On HIP devices ROCm has no conditional graph node at any version, and both
+    :func:`warp.capture_while` and :func:`warp.capture_if` are emulated: a body is spliced
+    into the parent graph and skips itself only when its kernels read the region's guard
+    word. Warp-generated kernels do; a branch or loop body passed as an already-captured
+    :class:`Graph` cannot be, and is refused. See :ref:`the HIP caveat in the user guide
+    <hip_conditional_nodes>`.
 
     Returns:
         ``True`` if conditional regions can be captured on this build, ``False`` otherwise.
@@ -13459,6 +13554,18 @@ def capture_if(
     captures with ``apic=True``), branch bodies must be callbacks; passing :class:`Graph` objects is not yet
     supported. CUDA capture with ``apic=False`` supports either form.
 
+    On HIP devices ROCm has no conditional graph node, so a branch is instead spliced into the
+    parent graph and predicated on a guard word that its kernels read. That imposes three limits
+    inside a graph capture, all of which raise rather than silently run the wrong branch:
+
+    * Both branches must be callables. A branch passed as an already-captured :class:`Graph`
+      has its kernel nodes fixed and cannot be bound to the guard.
+    * A branch body may contain only Warp-generated kernels. A native library call, a raw driver
+      launch, or a memcpy/memset node does not read the guard and would execute even when the
+      condition selects the other branch.
+    * Replaying a recorded ``capture_if`` through APIC is not supported; use ``capture_if``
+      directly inside the capture. Recording is unaffected -- the live capture is correct.
+
     Args:
         condition: Warp array holding the condition value.
         on_true: A callback function or :class:`Graph` to execute if the condition is True.
@@ -13531,6 +13638,21 @@ def capture_if(
     # ensure conditional graph nodes are supported
     assert_conditional_graph_support()
 
+    # HIP has no conditional graph node. A branch is spliced into the parent graph
+    # and skips itself only when its kernels test the branch's guard word (see
+    # warp/native/hip_graph_cond.h). That pointer is bound at launch time, so a
+    # branch given as an already-captured Graph cannot be predicated -- its kernel
+    # nodes were recorded outside any region and carry a null guard baked into
+    # their parameter blocks. It would run whichever way the condition went, which
+    # for a branch is not wasted work but the wrong branch. Refuse.
+    if runtime.is_hip and (isinstance(on_true, Graph) or isinstance(on_false, Graph)):
+        raise NotImplementedError(
+            "capture_if() with a Graph branch is not supported on HIP. HIP predicates a branch through a guard "
+            "word its kernels read, and a pre-captured graph's kernel nodes cannot be bound to that guard, so the "
+            "branch would execute even when the condition selects the other one. Pass the branch as a callable "
+            "instead."
+        )
+
     # Under a CUDA APIC capture, record an APIC_OP_IF op alongside building the
     # live conditional nodes (record-and-execute). Each branch callback runs
     # exactly once: its kernel launches are captured into the native body graph
@@ -13552,6 +13674,17 @@ def capture_if(
         if cond_region_id < 0:
             raise RuntimeError("capture_if(): condition array could not be tracked for APIC capture (null pointer?)")
 
+    # Declare which region encloses this one, BEFORE opening it. At this point the
+    # stack top is the guard of the branch (or while body) we are nested inside,
+    # because every inner region pushes and pops within its own callback -- so an
+    # empty stack means top level, which is what a null enclosing guard says.
+    #
+    # HIP needs this for correctness: it cannot predicate the seed kernels that
+    # write the guards, so a nested region's cloned seed would re-arm its guard
+    # even inside a branch that was not taken. A no-op on CUDA. See
+    # wp_cuda_graph_set_enclosing_guard in warp.h.
+    _set_enclosing_guard(stream)
+
     # insert conditional node
     graph_on_true = ctypes.c_void_p()
     graph_on_false = ctypes.c_void_p()
@@ -13565,6 +13698,33 @@ def capture_if(
         None if on_false is None else ctypes.byref(graph_on_false),
     ):
         raise RuntimeError(runtime.get_error_string())
+
+    # Fetch each branch's guard word. Kernels launched by a branch callback bind the
+    # matching pointer as their hidden trailing parameter and return early when it
+    # reads zero. The two branches get different slots: the if branch is seeded from
+    # `condition`, the else branch from its complement, both evaluated once at splice
+    # time so an if-body that writes `condition` cannot change what the else branch
+    # sees. On CUDA the conditional node does this and both guards come back null.
+    guard_on_true = None
+    guard_on_false = None
+    if runtime.is_hip:
+        if_guard_ptr = ctypes.c_void_p()
+        else_guard_ptr = ctypes.c_void_p()
+        if not runtime.core.wp_cuda_graph_get_if_else_guards(
+            stream.cuda_stream, ctypes.byref(if_guard_ptr), ctypes.byref(else_guard_ptr)
+        ):
+            raise RuntimeError(runtime.get_error_string())
+        for branch, requested, ptr in (
+            ("on_true", on_true, if_guard_ptr),
+            ("on_false", on_false, else_guard_ptr),
+        ):
+            if requested is not None and not ptr.value:
+                raise RuntimeError(
+                    f"capture_if(): HIP returned a null guard for the {branch} branch. Its kernels would not be "
+                    "predicated and the branch would run regardless of the condition."
+                )
+        guard_on_true = if_guard_ptr.value
+        guard_on_false = else_guard_ptr.value
 
     # pause capturing parent graph
     main_graph = capture_pause(stream=stream, _suspend_apic_recording=False)
@@ -13580,6 +13740,11 @@ def capture_if(
     branch_a_start = None
     branch_b_start = None
     branch_capture_active = False
+    # Count of guards pushed onto runtime._cond_guards and not yet popped. The
+    # normal path pops each branch's guard as soon as that branch closes; this
+    # counter is what lets the finally drain one left behind by an exception,
+    # whichever branch raised.
+    guards_pushed = 0
     try:
         # capture if-graph
         if on_true is not None:
@@ -13587,6 +13752,16 @@ def capture_if(
             # added through _retain_module_exec() end up in the correct python graph object
             main_graph.graph = graph_on_true
             branch_a_start = runtime.core.wp_apic_begin_branch(apic_capture.apic_state) if apic_recording else None
+            # Snapshot the counters before the branch runs, so its guarded launches can be
+            # compared against the branch graph's kernel nodes once it is captured.
+            # _cond_region_opens detects a nested region, which makes that comparison
+            # meaningless (see _count_unguarded_body_kernels).
+            launch_mark = runtime._cond_launch_count
+            region_mark = runtime._cond_region_opens
+            if guard_on_true is not None:
+                runtime._cond_region_opens += 1
+                runtime._cond_guards.append(guard_on_true)
+                guards_pushed += 1
             capture_resume(main_graph, stream=stream, _resume_apic_recording=False)
             branch_capture_active = True
             if isinstance(on_true, Callable):
@@ -13602,12 +13777,23 @@ def capture_if(
                 raise TypeError("on_true must be a Callable or a Graph")
             capture_pause(stream=stream, _suspend_apic_recording=False)
             branch_capture_active = False
+            if guard_on_true is not None:
+                runtime._cond_guards.pop()
+                guards_pushed -= 1
             if apic_recording:
                 branch_a.value = runtime.core.wp_apic_end_branch(apic_capture.apic_state, branch_a_start)
 
             # check the if-body graph
-            if not runtime.core.wp_cuda_graph_check_conditional_body(graph_on_true):
+            if not runtime.core.wp_cuda_graph_check_conditional_if_body(graph_on_true):
                 raise RuntimeError(runtime.get_error_string())
+
+            if guard_on_true is not None:
+                _check_unguarded_branch_kernels(
+                    graph_on_true,
+                    runtime._cond_launch_count - launch_mark,
+                    nested=runtime._cond_region_opens != region_mark + 1,
+                    branch="on_true",
+                )
 
         # capture else-graph
         if on_false is not None:
@@ -13615,6 +13801,12 @@ def capture_if(
             # added through _retain_module_exec() end up in the correct python graph object
             main_graph.graph = graph_on_false
             branch_b_start = runtime.core.wp_apic_begin_branch(apic_capture.apic_state) if apic_recording else None
+            launch_mark = runtime._cond_launch_count
+            region_mark = runtime._cond_region_opens
+            if guard_on_false is not None:
+                runtime._cond_region_opens += 1
+                runtime._cond_guards.append(guard_on_false)
+                guards_pushed += 1
             capture_resume(main_graph, stream=stream, _resume_apic_recording=False)
             branch_capture_active = True
             if isinstance(on_false, Callable):
@@ -13630,12 +13822,23 @@ def capture_if(
                 raise TypeError("on_false must be a Callable or a Graph")
             capture_pause(stream=stream, _suspend_apic_recording=False)
             branch_capture_active = False
+            if guard_on_false is not None:
+                runtime._cond_guards.pop()
+                guards_pushed -= 1
             if apic_recording:
                 branch_b.value = runtime.core.wp_apic_end_branch(apic_capture.apic_state, branch_b_start)
 
             # check the else-body graph
-            if not runtime.core.wp_cuda_graph_check_conditional_body(graph_on_false):
+            if not runtime.core.wp_cuda_graph_check_conditional_if_body(graph_on_false):
                 raise RuntimeError(runtime.get_error_string())
+
+            if guard_on_false is not None:
+                _check_unguarded_branch_kernels(
+                    graph_on_false,
+                    runtime._cond_launch_count - launch_mark,
+                    nested=runtime._cond_region_opens != region_mark + 1,
+                    branch="on_false",
+                )
     except Exception:
         # Roll back any branch begun-but-not-ended (so its partial ops leave the main
         # stream) and free the extracted bodies, so APIC branch state does not leak.
@@ -13664,12 +13867,28 @@ def capture_if(
         except Exception:
             pass
         raise
+    finally:
+        # Pop on every path. A leaked guard would predicate unrelated kernels
+        # launched after this branch against a slot nobody re-arms. The pending
+        # pair itself is drained by wp_hip_graph_abort_open_region at end_capture,
+        # which is the only place that can know the capture was abandoned.
+        while guards_pushed > 0:
+            runtime._cond_guards.pop()
+            guards_pushed -= 1
 
     # restore the main graph to its original state
     main_graph.graph = main_graph_ptr
 
     # resume capturing parent graph
     capture_resume(main_graph, stream=stream, _resume_apic_recording=False)
+
+    # Splice the branch bodies into the parent. HIP only, and it has to be here:
+    # this is the first point where the parent is capturing again AND both bodies
+    # are complete, which is what the two sequential conditional regions need (see
+    # wp_hip_graph_splice_if_else). No-op on CUDA, where insert_if_else already
+    # placed the conditional node.
+    if not runtime.core.wp_cuda_graph_splice_if_else(device.context, stream.cuda_stream):
+        raise RuntimeError(runtime.get_error_string())
 
     if apic_recording:
         from warp._src.apic.types import APIC_OP_IF  # noqa: PLC0415
@@ -13784,6 +14003,12 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
         cond_region_id, cond_offset = apic_capture.track_array(condition)
         if cond_region_id < 0:
             raise RuntimeError("capture_while(): condition array could not be tracked for APIC capture (null pointer?)")
+
+    # Declare the enclosing region before opening this one -- see the identical
+    # call in capture_if. Without it a while loop nested inside a suppressed
+    # branch re-arms its own guard between unroll copies and runs the whole
+    # unroll anyway.
+    _set_enclosing_guard(stream)
 
     # insert conditional while-node
     body_graph = ctypes.c_void_p()

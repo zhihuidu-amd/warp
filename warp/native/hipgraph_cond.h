@@ -333,6 +333,29 @@ hipError_t hipGraphCondSetMaxIters(hipStream_t stream, unsigned int max_iters);
  */
 hipError_t hipGraphCondSetCondition(hipStream_t stream, hipGraphCondHandle handle, const int* condition);
 
+/**
+ * Emit a kernel on @p stream that writes the logical complement of
+ * @p condition into @p handle's slot.
+ *
+ * This exists for the if/else shape. An else-branch region has to test
+ * `!condition`, and the complement must be evaluated as a graph node so that it
+ * is recomputed on every replay -- reading the condition on the host would bake
+ * one capture-time value into the graph forever.
+ *
+ * It must also be evaluated ONCE, up front, before the if-branch region is
+ * spliced: the two regions are spliced sequentially into the parent, so an
+ * if-body that writes @p condition would otherwise change what the else region
+ * sees. Emitting this node ahead of both regions is what makes the pair behave
+ * like CUDA's single conditional node with two bodies.
+ *
+ * @p handle is used purely as storage here -- it is never passed to
+ * hipGraphCondBegin. Pass its device pointer
+ * (hipGraphCondHandleGetDevicePtr) as the `condition` argument of the
+ * else region's Begin. Like Begin, this bakes the slot address into the
+ * caller's graph, so the slot is retired and will not be recycled.
+ */
+hipError_t hipGraphCondWriteComplement(hipStream_t stream, hipGraphCondHandle handle, const int* condition);
+
 /* ---------------------------------------------------------------------------
  * Predication support
  * ------------------------------------------------------------------------ */
@@ -353,6 +376,38 @@ hipError_t hipGraphCondSetCondition(hipStream_t stream, hipGraphCondHandle handl
  * @param guard_out receives the device pointer to pass to body kernels
  */
 hipError_t hipGraphCondSetGuard(hipGraphCondHandle handle, unsigned int** guard_out);
+
+/**
+ * Declare which region lexically encloses this one, so nesting stays exclusive.
+ *
+ * Call this BEFORE hipGraphCondBegin. Passing the guard of the enclosing region
+ * (obtained from hipGraphCondSetGuard on the enclosing handle) makes every seed
+ * that writes this handle's slot compute
+ *
+ *     slot = (*condition != 0) && (*enclosing != 0)
+ *
+ * instead of `(*condition != 0)`. Pass NULL, or simply do not call this, for a
+ * top-level region; the behaviour is then exactly as before.
+ *
+ * WHY THIS IS REQUIRED FOR NESTING. Body kernels are predicated, but the seed
+ * kernels that WRITE the guards cannot be -- something has to make the first
+ * write. When a region nests, the enclosing body graph is cloned into the parent
+ * and the inner region's seed nodes are cloned with it. Those clones execute
+ * unconditionally, so without this conjunction they re-arm the inner guard from
+ * the user's condition array even when the enclosing guard is 0, and the inner
+ * body runs inside a branch that was not taken. On gfx942 that produced a silent
+ * wrong answer (5005 where 385 was correct) rather than any error.
+ *
+ * The conjunction composes to arbitrary depth: each enclosing guard was itself
+ * written by a seed that ANDed with its own enclosing guard.
+ *
+ * The value is stored on the handle, not on the open region, because
+ * hipGraphCondEnd's unroll emits further seeds between body copies and they need
+ * the same treatment.
+ *
+ * @param enclosing guard word of the enclosing region, or NULL for top level
+ */
+hipError_t hipGraphCondSetEnclosingGuard(hipGraphCondHandle handle, const unsigned int* enclosing);
 
 /**
  * The guard prologue. Put this as the first statement of every body kernel.

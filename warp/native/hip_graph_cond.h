@@ -49,9 +49,11 @@
 //     bytes again -- so the usual cost is wasted dispatch rather than a wrong
 //     answer. An IN-PLACE built-in is the exception and would accumulate. Do
 //     not put one directly in a capture_while body on HIP.
-// capture_if is also still refused on HIP (wp_cuda_graph_insert_if_else in
-// warp.cu); the guard is the mechanism it was waiting on, but wiring
-// hipGraphCondTypeIf is separate work.
+// capture_if is built on the same guard, with one extra constraint of its own.
+// A while-body that ignores the guard costs wasted iterations; an if/else body
+// that ignores it runs the branch the condition selected AGAINST. So the three
+// cases above are warnings for capture_while and hard errors for capture_if --
+// see wp_cuda_graph_check_conditional_if_body in warp.cu.
 //
 // The adaptation is only in the shape of the call. Warp expects
 //
@@ -103,6 +105,54 @@ bool wp_hip_graph_insert_while(void* stream, int* condition, void** body_graph_r
 // Re-arm the condition for a region opened above. Mirrors
 // wp_cuda_graph_set_condition; separated so warp.cu's dispatch stays symmetric.
 bool wp_hip_graph_set_condition(void* stream, int* condition, uint64_t handle);
+
+// Begin an if/else pair on `stream` and hand Warp one graph per branch.
+//
+// THIS OPENS NO REGION. That is the whole trick, and it is why the shape works
+// at all on HIP.
+//
+// Warp's contract requires BOTH body graphs back from a single call, before
+// either branch has been captured -- on CUDA one cuGraphAddNode with
+// conditional.size = 2 yields both. hipGraphCondBegin opens exactly one region
+// on a stream and closes it with hipGraphCondEndWithGraph, and g_pending
+// refuses a second open region on the same stream, so two regions cannot both
+// be open before either body exists.
+//
+// They never have to be. The regions are needed only to SPLICE finished bodies
+// into the parent, and that can be done sequentially, afterwards. So this call
+// only hands out two fresh empty hipGraph_t and parks the condition pointer;
+// wp_hip_graph_splice_if_else does the Begin/EndWithGraph pairs, one after the
+// other, once both bodies are complete and the parent is capturing again.
+//
+// Pass null for a branch that is not used; at least one must be non-null.
+bool wp_hip_graph_insert_if_else(void* stream, int* condition, void** if_graph_ret, void** else_graph_ret);
+
+// Hand back the device guard word for each branch of the pending pair.
+//
+// Each branch gets its OWN slot, because each is predicated on a different
+// value: the if branch on `condition`, the else branch on its complement. Warp
+// binds the matching pointer as the hidden trailing kernel argument for
+// launches made inside that branch's callback. A branch that was not requested
+// reports a null guard.
+bool wp_hip_graph_get_if_else_guards(void* stream, void** if_guard_ret, void** else_guard_ret);
+
+// Splice both branch bodies into the parent graph. Call once, after both bodies
+// have been captured and the parent capture has been resumed.
+//
+// Emits, in this order:
+//   1. the complement node: scratch = !*condition
+//   2. the if region -- Begin(if_handle, If, condition, 1) + EndWithGraph
+//   3. the else region -- Begin(else_handle, If, scratch, 1) + EndWithGraph
+//
+// Step 1 comes first so that both branches test the SAME value of the condition
+// even if the if-body writes to it, which is what CUDA's single two-body
+// conditional node gives for free. Steps 2 and 3 are sequential: only one
+// region is ever open.
+bool wp_hip_graph_splice_if_else(void* stream);
+
+// The stricter body check the if/else shape needs lives in warp.cu, next to the
+// node-type machinery it shares with the CUDA path:
+// wp_cuda_graph_check_conditional_if_body.
 
 // Hand back the device guard word for a region opened by insert_while.
 //
@@ -156,5 +206,25 @@ bool wp_hip_graph_abort_open_region(void* stream);
 // needs one iteration: it emits 32 predicated bodies and costs roughly 2x the
 // unconditional graph. Callers that know their budget should set it.
 bool wp_hip_graph_set_max_iters(void* stream, unsigned int max_iters);
+
+// Declare the guard of the region that lexically encloses the next one opened on
+// this stream. Parked per-stream for the same reason as set_max_iters, and
+// consumed -- and erased -- by the next insert_while / insert_if_else. Pass null,
+// or simply do not call it, for a top-level region.
+//
+// REQUIRED FOR CORRECT NESTING, not an optimisation. The unroll predicates body
+// kernels but cannot predicate the seed kernels that WRITE the guards; something
+// has to make the first write. When regions nest, the enclosing body graph is
+// cloned into the parent and the inner region's seeds are cloned with it, and
+// those clones run unconditionally -- re-arming the inner guard straight from the
+// user's condition array even when the enclosing guard is 0. The inner body then
+// runs inside a branch that was not taken. Measured on gfx942: test_complex_capture
+// with both conditions false returned 5005 where 385 is correct, exactly 385 x 13,
+// the 13x kernel being the inner else body of the suppressed branch.
+//
+// With a guard attached, every seed writes `(*condition != 0) && (*enclosing != 0)`.
+// That composes to any depth, because each enclosing guard was itself written by a
+// seed that ANDed with its own. See hipGraphCondSetEnclosingGuard in hipgraph_cond.h.
+bool wp_hip_graph_set_enclosing_guard(void* stream, void* guard);
 
 #endif  // WP_ENABLE_HIP
