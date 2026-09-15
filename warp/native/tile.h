@@ -198,7 +198,32 @@ template <> struct wp_is_null_func<int> {
 
 */
 
+// Most of the tile API is written as thin unannotated wrappers, on the assumption that the
+// compiler makes an unannotated function callable from device code. NVRTC does, because
+// warp.cu passes --device-as-default-execution-space on every JIT compile. hiprtc rejects
+// that spelling, so the translator in hip_util.h drops it and clang falls back to its
+// default of __host__ -- which makes those wrappers uncallable from a __global__ function:
+//
+//     error: no matching function for call to 'tile_cholesky_solve'
+//     note: candidate function not viable: call to __host__ function from __global__ function
+//
+// Restore the option's semantics with the equivalent clang pragma. Scoped to the namespace
+// bodies rather than the translation unit: wrapping the whole unit also re-annotates crt.h's
+// deliberately __host__ memset, which then collides with hiprtc's own __device__ memset.
+//
+// Gated on __HIPCC_RTC__, which hiprtc defines and hipcc does not, so this affects only the
+// JIT path that loses the option. Expands to nothing on every other compiler, leaving
+// NVRTC, nvcc and the CPU build byte-identical.
+#if defined(__HIPCC_RTC__)
+#define WP_TILE_DEFAULT_DEVICE_BEGIN _Pragma("clang force_cuda_host_device begin")
+#define WP_TILE_DEFAULT_DEVICE_END _Pragma("clang force_cuda_host_device end")
+#else
+#define WP_TILE_DEFAULT_DEVICE_BEGIN
+#define WP_TILE_DEFAULT_DEVICE_END
+#endif
+
 namespace wp {
+WP_TILE_DEFAULT_DEVICE_BEGIN
 
 // Primary template
 template <typename T, typename U> struct is_same {
@@ -5283,10 +5308,13 @@ void adj_tile_sub_inplace(
 // `wp::tile_fft_entry`, which selects between CPU sequential, GPU cooperative,
 // or cuFFTDx LTO at template-instantiation time based on `wp_is_null_func`.
 // tile_fft.h opens its own `namespace wp { ... }`, so we close the surrounding
-// one to avoid nesting it as `wp::wp`.
+// one to avoid nesting it as `wp::wp`. tile_fft.h therefore sits between the two
+// WP_TILE_DEFAULT_DEVICE regions rather than inside either of them.
+WP_TILE_DEFAULT_DEVICE_END
 }  // namespace wp
 #include "tile_fft.h"
 namespace wp {
+WP_TILE_DEFAULT_DEVICE_BEGIN
 
 template <typename Tile> inline CUDA_CALLABLE auto tile_transpose(Tile& t)
 {
@@ -6136,6 +6164,7 @@ template <typename T, int Capacity> inline CUDA_CALLABLE int tile_stack_count(ti
     return *s.count;
 }
 
+WP_TILE_DEFAULT_DEVICE_END
 }  // namespace wp
 
 

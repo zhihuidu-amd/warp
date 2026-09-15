@@ -42,6 +42,7 @@ using wp_tile_warp_mask_t = decltype(WP_TILE_FULL_WARP_MASK);
     ((((wp_tile_warp_mask_t)1) << (lane)) - ((wp_tile_warp_mask_t)1))
 
 namespace wp {
+WP_TILE_DEFAULT_DEVICE_BEGIN
 
 
 template <typename T> int argmax_tracker(T champion_value, T current_value, int champion_index, int current_index)
@@ -1068,6 +1069,7 @@ template <typename Tile> auto tile_argmax(Tile& t) { return tile_arg_reduce(max,
 template <typename Tile> auto tile_argmin(Tile& t) { return tile_arg_reduce(min, argmin_tracker, t); }
 
 
+WP_TILE_DEFAULT_DEVICE_END
 }  // namespace wp
 
 

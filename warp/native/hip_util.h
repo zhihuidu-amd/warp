@@ -290,7 +290,8 @@ static inline hiprtcResult wp_hiprtcCompileProgram(hiprtcProgram prog, int numOp
         }
         // NVRTC-only options. hiprtc rejects each with "unknown argument" and
         // fails the whole compile, so they are dropped rather than translated.
-        // None changes program semantics on this path:
+        // All but the last are performance or diagnostic hints and do not
+        // change program semantics on this path:
         //
         //   --Ofast-compile=N                 compile-speed/codegen tradeoff
         //   -pch, --pch-dir=                  precompiled headers; hiprtc has
@@ -299,11 +300,28 @@ static inline hiprtcResult wp_hiprtcCompileProgram(hiprtcProgram prog, int numOp
         //   --fmad=true|false                 fused multiply-add contraction.
         //                                     NOT dropped silently below --
         //                                     see the -ffp-contract mapping
-        //   --device-as-default-execution-space
         //   --extra-device-vectorization      optimizer hints
         //   --restrict                        aliasing hint
         //   --diag-suppress=...               suppresses nvcc diagnostic ids
         //                                     that do not exist in clang
+        //
+        //   --device-as-default-execution-space
+        //       DOES change semantics, and dropping it here is why the tile
+        //       headers carry WP_TILE_DEFAULT_DEVICE_BEGIN/_END. warp.cu pushes
+        //       this option on every JIT compile. On NVRTC it makes every
+        //       unannotated function __device__; hiprtc has no equivalent
+        //       spelling, so clang falls back to its default of __host__ and
+        //       the thin unannotated tile_* wrappers become uncallable from a
+        //       __global__ function:
+        //
+        //           error: no matching function for call to 'tile_cholesky_solve'
+        //           note: candidate function not viable: call to __host__
+        //                 function from __global__ function
+        //
+        //       tile.h restores the semantics with the equivalent clang pragma,
+        //       scoped to the `namespace wp` bodies and gated on __HIPCC_RTC__.
+        //       Keep the two in sync: if this drop is ever removed because
+        //       hiprtc gains the option, the pragma should go with it.
         static const char* const nvrtc_only[] = {
             "--Ofast-compile",
             "-pch",
