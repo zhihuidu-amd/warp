@@ -116,7 +116,7 @@ bool hgcVerbose()
  * 13x kernel being the inner else body of the branch that was suppressed.
  *
  * ANDing here composes to any depth, because each enclosing guard was itself
- * written by a seed that ANDed with *its* enclosing. A null `enclosing` means
+ * written by a seed that ANDs with *its* enclosing. A null `enclosing` means
  * "top level" and reads as 1.
  *
  * The enclosing load is RELAXED, like the body guard read: the node that wrote
@@ -356,9 +356,7 @@ hipError_t poolReserveLocked(SlotPool& pool, int device, unsigned int slots)
          * the old code returned hipSuccess here, so a caller asking for 256
          * slots after a default 64-slot slab existed was told "fine" and then
          * ran out mid-capture. */
-        HGC_LOG(
-            "device %d pool already live with %u slots; request for %u not honoured", device, pool.capacity, slots
-        );
+        HGC_LOG("device %d pool already live with %u slots; request for %u not honoured", device, pool.capacity, slots);
         return hipErrorOutOfMemory;
     }
 

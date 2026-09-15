@@ -224,7 +224,7 @@ bool wp_hip_graph_set_max_iters(void* stream, unsigned int max_iters);
 //
 // With a guard attached, every seed writes `(*condition != 0) && (*enclosing != 0)`.
 // That composes to any depth, because each enclosing guard was itself written by a
-// seed that ANDed with its own. See hipGraphCondSetEnclosingGuard in hipgraph_cond.h.
+// seed that ANDs with its own. See hipGraphCondSetEnclosingGuard in hipgraph_cond.h.
 bool wp_hip_graph_set_enclosing_guard(void* stream, void* guard);
 
 #endif  // WP_ENABLE_HIP

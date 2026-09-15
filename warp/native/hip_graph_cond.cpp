@@ -46,11 +46,11 @@ struct PendingRegion {
 struct PendingIfElse {
     int* condition;
     hipGraph_t parent_graph;
-    hipGraphCondHandle if_handle;    // null if the caller asked for no if branch
+    hipGraphCondHandle if_handle;  // null if the caller asked for no if branch
     hipGraphCondHandle else_handle;  // null if the caller asked for no else branch
-    hipGraphCondHandle inv_handle;   // scratch word holding !*condition; null with no else
-    hipGraph_t if_graph;             // null if no if branch
-    hipGraph_t else_graph;           // null if no else branch
+    hipGraphCondHandle inv_handle;  // scratch word holding !*condition; null with no else
+    hipGraph_t if_graph;  // null if no if branch
+    hipGraph_t else_graph;  // null if no else branch
 };
 
 std::mutex g_cond_mutex;
@@ -443,9 +443,7 @@ bool wp_hip_graph_insert_if_else(void* stream, int* condition, void** if_graph_r
     auto& stack = g_pending_if[hip_stream];
     for (const PendingIfElse& open : stack) {
         if (open.parent_graph == parent_graph) {
-            wp::set_error_string(
-                "Warp error: an if/else pair is already open on this stream against the same graph"
-            );
+            wp::set_error_string("Warp error: an if/else pair is already open on this stream against the same graph");
             return false;
         }
     }

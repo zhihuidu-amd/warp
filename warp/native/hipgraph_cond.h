@@ -399,7 +399,7 @@ hipError_t hipGraphCondSetGuard(hipGraphCondHandle handle, unsigned int** guard_
  * wrong answer (5005 where 385 was correct) rather than any error.
  *
  * The conjunction composes to arbitrary depth: each enclosing guard was itself
- * written by a seed that ANDed with its own enclosing guard.
+ * written by a seed that ANDs with its own enclosing guard.
  *
  * The value is stored on the handle, not on the open region, because
  * hipGraphCondEnd's unroll emits further seeds between body copies and they need
