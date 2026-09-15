@@ -247,7 +247,7 @@ warp_shuffle_down(wp::indexedarray_t<T> val, int offset, wp_tile_warp_mask_t mas
 }
 
 
-template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op f, unsigned int mask)
+template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op f, wp_tile_warp_mask_t mask)
 {
     T sum = val;
 
@@ -260,7 +260,7 @@ template <typename T, typename Op> inline CUDA_CALLABLE T warp_reduce(T val, Op 
         // handle partial warp case - works for contiguous masks
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             T shfl_val = warp_shuffle_down(sum, offset, mask);
-            if ((mask & (1 << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0)
+            if ((mask & (((wp_tile_warp_mask_t)1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0)
                 sum = f(sum, shfl_val);
         }
     }
@@ -274,7 +274,8 @@ template <typename T> struct ValueAndIndex {
 };
 
 template <typename T, typename Op, typename OpTrack>
-inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, OpTrack track, unsigned int mask)
+inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, OpTrack track,
+                                                          wp_tile_warp_mask_t mask)
 {
     T sum = val;
     int index = idx;
@@ -292,7 +293,7 @@ inline CUDA_CALLABLE ValueAndIndex<T> warp_reduce_tracked(T val, int idx, Op f, 
         for (int offset = WP_TILE_WARP_SIZE / 2; offset > 0; offset /= 2) {
             T shfl_val = warp_shuffle_down(sum, offset, mask);
             int shfl_index = warp_shuffle_down(index, offset, mask);
-            if ((mask & (1 << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0) {
+            if ((mask & (((wp_tile_warp_mask_t)1) << ((threadIdx.x + offset) % WP_TILE_WARP_SIZE))) != 0) {
                 index = track(sum, shfl_val, index, shfl_index);
                 sum = f(sum, shfl_val);
             }
