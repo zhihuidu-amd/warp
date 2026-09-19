@@ -3,6 +3,37 @@
 
 #pragma once
 
+// Internal lane-participation masks for tile warp collectives, not logical
+// tile masks. Keep this block before builtin.h because its tile headers use it.
+//
+// A CUDA warp is 32 lanes; an AMD wavefront is 64. Anything that indexes lanes
+// or builds a lane mask has to follow, so the width and the mask type are
+// selected together. HIP enforces the pairing: __ballot_sync static_asserts
+// that the mask is 64-bit and returns unsigned long long, so a 32-bit mask is a
+// compile error rather than a silent truncation.
+#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
+#define WP_TILE_WARP_SIZE 64
+
+#define WP_TILE_LANE_MASK_ALL 0xffffffffffffffffull
+#define WP_TILE_LANE_MASK_POPC(mask) __popcll(mask)
+// __ffs must widen with the mask for the same reason __popc does. HIP overloads
+// __ffs(int) and __ffsll(long long), so passing a 64-bit mask to __ffs is
+// ambiguous rather than truncating -- "call to '__ffs' is ambiguous".
+#define WP_TILE_LANE_MASK_FFS(mask) __ffsll(mask)
+#else
+#define WP_TILE_WARP_SIZE 32
+
+#define WP_TILE_LANE_MASK_ALL 0xffffffffu
+#define WP_TILE_LANE_MASK_POPC(mask) __popc(mask)
+#define WP_TILE_LANE_MASK_FFS(mask) __ffs(mask)
+#endif
+
+using wp_tile_lane_mask_bits_t = decltype(WP_TILE_LANE_MASK_ALL);
+
+// Excludes `lane` itself.
+#define WP_TILE_LANE_MASK_BELOW(lane)                                                                                  \
+    ((((wp_tile_lane_mask_bits_t)1) << (lane)) - ((wp_tile_lane_mask_bits_t)1))
+
 #include "builtin.h"
 
 #include "rand.h"

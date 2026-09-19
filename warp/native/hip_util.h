@@ -226,7 +226,7 @@ static inline hiprtcResult wp_hiprtcCompileProgram(hiprtcProgram prog, int numOp
     translated.push_back("-D__CUDA_ARCH__=700");
 
     // WP_ENABLE_HIP is what selects the 64-lane wavefront: tile_reduce.h gates
-    // WP_TILE_WARP_SIZE and WP_TILE_FULL_WARP_MASK on it, and every warp
+    // WP_TILE_WARP_SIZE and WP_TILE_LANE_MASK_ALL on it, and every warp
     // intrinsic in tile_radix_sort.h and tile_scan.h takes its mask from there.
     //
     // The AOT build passes it on the command line, so the tile headers were

@@ -103,7 +103,7 @@ constexpr inline CUDA_CALLABLE int next_higher_pow2(int input)
 inline CUDA_CALLABLE half warp_shuffle_xor(half val, int lane_mask)
 {
     unsigned int bits = static_cast<unsigned int>(val.u);
-    bits = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, bits, lane_mask);
+    bits = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, bits, lane_mask);
 
     half result;
     result.u = static_cast<unsigned short>(bits);
@@ -114,7 +114,7 @@ inline CUDA_CALLABLE half warp_shuffle_xor(half val, int lane_mask)
 inline CUDA_CALLABLE bfloat16 warp_shuffle_xor(bfloat16 val, int lane_mask)
 {
     unsigned int bits = static_cast<unsigned int>(val.u);
-    bits = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, bits, lane_mask);
+    bits = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, bits, lane_mask);
 
     bfloat16 result;
     result.u = static_cast<unsigned short>(bits);
@@ -142,7 +142,7 @@ template <typename T> inline CUDA_CALLABLE T warp_shuffle_xor(T val, int lane_ma
 
     WP_PRAGMA_UNROLL
     for (int i = 0; i < word_count; ++i) {
-        output[i] = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, input[i], lane_mask);
+        output[i] = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, input[i], lane_mask);
     }
 
     return *reinterpret_cast<T*>(output);
@@ -154,7 +154,7 @@ inline CUDA_CALLABLE wp::vec_t<Length, T> warp_shuffle_xor(wp::vec_t<Length, T> 
     wp::vec_t<Length, T> result;
 
     for (unsigned i = 0; i < Length; ++i)
-        result[i] = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, val[i], lane_mask);
+        result[i] = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, val[i], lane_mask);
 
     return result;
 }
@@ -190,7 +190,7 @@ inline CUDA_CALLABLE wp::mat_t<Rows, Cols, T> warp_shuffle_xor(wp::mat_t<Rows, C
 
     for (unsigned i = 0; i < Rows; ++i)
         for (unsigned j = 0; j < Cols; ++j)
-            result.data[i][j] = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, val.data[i][j], lane_mask);
+            result.data[i][j] = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, val.data[i][j], lane_mask);
 
     return result;
 }
@@ -227,8 +227,8 @@ template <typename T> inline CUDA_CALLABLE T* warp_shuffle_xor(T* val, int lane_
     unsigned long long ptr = reinterpret_cast<unsigned long long>(val);
     unsigned int ptr_lo = static_cast<unsigned int>(ptr);
     unsigned int ptr_hi = static_cast<unsigned int>(ptr >> 32);
-    ptr_lo = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, ptr_lo, lane_mask);
-    ptr_hi = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, ptr_hi, lane_mask);
+    ptr_lo = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, ptr_lo, lane_mask);
+    ptr_hi = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, ptr_hi, lane_mask);
     ptr = (static_cast<unsigned long long>(ptr_hi) << 32) | static_cast<unsigned long long>(ptr_lo);
     return reinterpret_cast<T*>(ptr);
 }
@@ -238,7 +238,7 @@ inline CUDA_CALLABLE wp::shape_t warp_shuffle_xor(wp::shape_t val, int lane_mask
     wp::shape_t result;
 
     for (int i = 0; i < wp::ARRAY_MAX_DIMS; ++i)
-        result.dims[i] = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, val.dims[i], lane_mask);
+        result.dims[i] = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, val.dims[i], lane_mask);
 
     return result;
 }
@@ -251,12 +251,12 @@ template <typename T> inline CUDA_CALLABLE wp::array_t<T> warp_shuffle_xor(wp::a
     result.grad = wp::warp_shuffle_xor(val.grad, lane_mask);
     result.shape = wp::warp_shuffle_xor(val.shape, lane_mask);
     for (int i = 0; i < wp::ARRAY_MAX_DIMS; ++i)
-        result.strides[i] = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, val.strides[i], lane_mask);
+        result.strides[i] = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, val.strides[i], lane_mask);
     result.ndim = static_cast<uint16_t>(
-        __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, static_cast<unsigned int>(val.ndim), lane_mask)
+        __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, static_cast<unsigned int>(val.ndim), lane_mask)
     );
     result.flags = static_cast<uint16_t>(
-        __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, static_cast<unsigned int>(val.flags), lane_mask)
+        __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, static_cast<unsigned int>(val.flags), lane_mask)
     );
 
     return result;
@@ -338,7 +338,7 @@ inline CUDA_CALLABLE void bitonic_sort_single_stage_full_thread_block(
 template <typename K, typename V>
 inline CUDA_CALLABLE void bitonic_sort_single_stage_full_warp(int k, unsigned int thread_id, int stride, K& key, V& val)
 {
-    auto s_key = __shfl_xor_sync(WP_TILE_FULL_WARP_MASK, key, stride);
+    auto s_key = __shfl_xor_sync(WP_TILE_LANE_MASK_ALL, key, stride);
     auto s_val = warp_shuffle_xor(val, stride);
     auto swap = (((thread_id & stride) != 0 ? key > s_key : key < s_key)) ^ ((thread_id & k) == 0);
     key = swap ? s_key : key;
@@ -642,19 +642,19 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
 
 // End bitonic sort
 
-// Takes the ballot as wp_tile_warp_mask_t, not unsigned int: __ballot_sync
+// Takes the ballot as wp_tile_lane_mask_bits_t, not unsigned int: __ballot_sync
 // returns 64 bits on a 64-wide wavefront, and a 32-bit parameter would discard
 // the upper half -- lanes 32-63 would contribute nothing to the scan. The mask
 // literal and the population count have to widen with it, hence
-// WP_TILE_LANES_BELOW and WP_TILE_POPC rather than a 1u shift and __popc.
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_warp_mask_t ballot_mask)
+// WP_TILE_LANE_MASK_BELOW and WP_TILE_LANE_MASK_POPC rather than a 1u shift and __popc.
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_lane_mask_bits_t ballot_mask)
 {
     // Lanes 0..lane inclusive: LANES_BELOW(lane) is exclusive, so add this lane.
-    wp_tile_warp_mask_t mask = WP_TILE_LANES_BELOW(lane) | (((wp_tile_warp_mask_t)1) << (wp_tile_warp_mask_t)lane);
-    return (int)WP_TILE_POPC(ballot_mask & mask);
+    wp_tile_lane_mask_bits_t mask = WP_TILE_LANE_MASK_BELOW(lane) | (((wp_tile_lane_mask_bits_t)1) << (wp_tile_lane_mask_bits_t)lane);
+    return (int)WP_TILE_LANE_MASK_POPC(ballot_mask & mask);
 }
 
-inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_warp_mask_t mask, bool thread_contributes_element)
+inline CUDA_CALLABLE int warp_scan_inclusive(int lane, wp_tile_lane_mask_bits_t mask, bool thread_contributes_element)
 {
     return warp_scan_inclusive(lane, __ballot_sync(mask, thread_contributes_element));
 }
@@ -666,7 +666,7 @@ template <typename T> inline CUDA_CALLABLE T warp_scan_inclusive(int lane, T val
 // more doubling step (i=32) or lanes 32-63 keep only half their contributions.
 #pragma unroll
     for (int i = 1; i < WP_TILE_WARP_SIZE; i *= 2) {
-        auto n = __shfl_up_sync(WP_TILE_FULL_WARP_MASK, value, i, WP_TILE_WARP_SIZE);
+        auto n = __shfl_up_sync(WP_TILE_LANE_MASK_ALL, value, i, WP_TILE_WARP_SIZE);
 
         if (lane >= i)
             value = value + n;
@@ -832,7 +832,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
                 }
 
                 int warp_offset = __shfl_sync(
-                    WP_TILE_FULL_WARP_MASK, inclusive_scan - f, warp_id
+                    WP_TILE_LANE_MASK_ALL, inclusive_scan - f, warp_id
                 );  //-f because warp_offset needs to be an exclusive scan
 
                 bool contributes = digit == b;
