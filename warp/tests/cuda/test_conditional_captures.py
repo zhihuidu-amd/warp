@@ -1268,6 +1268,14 @@ add_function_test(
     "test_while_capture_iteration_bound",
     test_while_capture_iteration_bound,
     devices=cuda_devices,
+    # This test exists to provoke the truncation report, and on HIP that report is
+    # a device-side printf. It reaches the process stdout through the HSA hostcall
+    # listener thread and libc's fully buffered stdout, so it can surface long
+    # after the launch that produced it -- an fd swap around the launch does not
+    # reliably capture it. CheckOutput would therefore fail the test for producing
+    # exactly the output it is asserting. The deterministic signal is the device
+    # counter, which the body checks with conditional_graph_truncations().
+    check_output=False,
 )
 add_function_test(
     TestConditionalCaptures, "test_while_capture_with_subgraph", test_while_capture_with_subgraph, devices=cuda_devices
