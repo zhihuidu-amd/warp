@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import subprocess
 import sys
 import unittest
 from functools import cache
@@ -3318,6 +3317,19 @@ def test_numpy_array_interface(test, device):
         assert a1.strides == a2.strides
 
 
+def test_numpy_array_interface_empty(test, device):
+    """Verify that NumPy accepts an empty Warp array through the array interface."""
+    a = wp.zeros((1, 0), dtype=wp.vec2f, device=device)
+
+    test.assertNotEqual(a.__array_interface__["data"][0], 0)
+
+    na = np.asarray(a)
+
+    test.assertEqual(na.shape, (1, 0, 2))
+    test.assertEqual(na.dtype, np.dtype(np.float32))
+    test.assertEqual(na.strides, (0, 8, 4))
+
+
 @wp.kernel
 def kernel_indexing_types(
     arr_1d: wp.array[wp.int32],
@@ -3654,18 +3666,12 @@ def _run_runtime_zero_step_subprocess(device_alias: str, timeout: int = 120):
     CPU execution aborts, while CUDA execution leaves the context unusable
     after trapping.
     """
-    return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; from warp.tests.test_array import _trigger_runtime_zero_step; "
-            "_trigger_runtime_zero_step(sys.argv[1])",
-            device_alias,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    return run_python_subprocess(
+        "import sys; from warp.tests.test_array import _trigger_runtime_zero_step; "
+        "_trigger_runtime_zero_step(sys.argv[1])",
+        device_alias,
         timeout=timeout,
+        hide_gpu=device_alias == "cpu",
     )
 
 
@@ -3675,10 +3681,9 @@ def test_array_runtime_zero_step(test, device):
     Run each case in a subprocess because the CPU path aborts and the CUDA
     path leaves the context unusable after trapping.
     """
-    if sys.platform == "win32":
+    if sys.platform == "win32" and device.is_cuda:
         test.skipTest(
-            "Skip on Windows because the intentional host abort or CUDA trap may destabilize QA hosts, which cannot "
-            "be identified reliably."
+            "Skip on Windows because the intentional CUDA trap may destabilize release-qualification systems."
         )
 
     result = _run_runtime_zero_step_subprocess(device.alias)
@@ -4235,6 +4240,7 @@ add_function_test(TestArray, "test_array_of_structs_roundtrip", test_array_of_st
 add_function_test(TestArray, "test_array_from_numpy", test_array_from_numpy, devices=devices)
 add_function_test(TestArray, "test_array_aliasing_from_numpy", test_array_aliasing_from_numpy, devices=["cpu"])
 add_function_test(TestArray, "test_numpy_array_interface", test_numpy_array_interface, devices=["cpu"])
+add_function_test(TestArray, "test_numpy_array_interface_empty", test_numpy_array_interface_empty, devices=["cpu"])
 
 add_function_test(TestArray, "test_array_inplace_diff_ops", test_array_inplace_diff_ops, devices=devices)
 add_function_test(TestArray, "test_array_inplace_non_diff_ops", test_array_inplace_non_diff_ops, devices=devices)

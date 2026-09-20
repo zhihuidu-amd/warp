@@ -34,6 +34,12 @@ import warp
 import warp.config
 from warp._src.logger import log_warning
 
+# NumPy versions before 2.4 incorrectly take an undocumented scalar path when
+# ``__array_interface__`` exposes a NULL data pointer. Keep a valid byte alive
+# for empty arrays so those versions can consume the interface.
+# https://github.com/numpy/numpy/issues/26037
+_ARRAY_INTERFACE_EMPTY_DATA = ctypes.c_byte()
+
 # type hints
 T = TypeVar("T")
 Length = TypeVar("Length", bound=int)
@@ -1084,7 +1090,11 @@ def vector(length, dtype):
 @functools.cache
 def matrix(shape, dtype):
     """Create a matrix type with the given shape and data type."""
-    assert len(shape) == 2
+    if len(shape) != 2:
+        dimension_label = "dimension" if len(shape) == 1 else "dimensions"
+        raise ValueError(
+            f"Matrix shape must have exactly two dimensions, got {len(shape)} {dimension_label} in shape {shape!r}"
+        )
 
     # canonicalize dtype
     if dtype is int:
@@ -1383,7 +1393,6 @@ def matrix(shape, dtype):
                         values = tuple(col_vec[x] for x in rows)
                         return vector(len(values), self._wp_scalar_type_)(*values)
 
-                assert ndim == 2
                 rows = range(*key[0].indices(self._shape_[1]))
                 cols = range(*key[1].indices(self._shape_[0]))
                 row_vecs = tuple(self.get_row(i) for i in rows)
@@ -1468,8 +1477,6 @@ def matrix(shape, dtype):
                             super().__setitem__(idx, mat_t.scalar_import(value[i] if v_shape else value))
 
                         return
-
-                assert ndim == 2
 
                 _, v_shape = flatten(value)
 
@@ -2335,7 +2342,7 @@ def _make_launch_bounds_class(ndim: int):
         (ctypes.Structure,),
         {
             "_fields_": (
-                ("shape", ctypes.c_int32 * ndim),
+                ("shape", ctypes.c_uint32 * ndim),
                 ("size", ctypes.c_size_t),
                 ("coord_mult", ctypes.c_size_t),
             ),
@@ -2948,7 +2955,8 @@ def scalars_equal_generic(a, b, match_generic=True):
 
 
 def seq_match_ellipsis(a, b) -> bool:
-    assert a and a[-1] is Ellipsis and len(a) == 2
+    if not a or a[-1] is not Ellipsis or len(a) != 2:
+        raise TypeError(f"An ellipsis sequence pattern must contain one type followed by Ellipsis, got {a!r}")
 
     # Compare the args against the type being repeated through the ellipsis.
     repeated_arg = a[0]
@@ -3281,10 +3289,10 @@ class array(Array[DType, NDim]):
         dtype (DType): The data type of the array.
         ndim (int): The number of array dimensions.
         size (int): The number of items in the array.
-        capacity (int): The amount of memory in bytes allocated for this array.
+        capacity (int): Maximum number of bytes addressable from ``ptr`` for this array.
         shape (tuple[int]): Dimensions of the array.
         strides (tuple[int]): Number of bytes in each dimension between successive elements of the array.
-        ptr (int): Pointer to underlying memory allocation backing the array.
+        ptr (int): Pointer to the array's first element. For a view, this may point inside a larger backing allocation.
         device (Device): The device where the array's memory allocation resides.
         pinned (bool): Indicates whether the array was allocated in pinned host memory.
         is_contiguous (bool): Indicates whether this array has a contiguous memory layout.
@@ -3353,8 +3361,9 @@ class array(Array[DType, NDim]):
             dtype: One of the available `data types <#data-types>`_, such as :class:`warp.float32`, :class:`warp.mat33`, or a custom `struct <#structs>`_. If dtype is ``Any`` and data is an ndarray, then it will be inferred from the array data type
             shape: Dimensions of the array
             strides: Number of bytes in each dimension between successive elements of the array
-            ptr: Address of an external memory address to alias (``data`` should be ``None``)
-            capacity: Maximum size in bytes of the ``ptr`` allocation (``data`` should be ``None``)
+            ptr: Address of the first element to alias (``data`` should be ``None``). This may point inside a larger
+                external allocation.
+            capacity: Maximum number of bytes addressable from ``ptr`` (``data`` should be ``None``).
             device: Device the array lives on
             copy: Whether the incoming ``data`` will be copied or aliased. Aliasing requires that
                 the incoming ``data`` already lives on the ``device`` specified and the data types match.
@@ -3381,6 +3390,12 @@ class array(Array[DType, NDim]):
 
         # reference to other array
         self._ref = None
+
+        self._storage_base_ptr: int | None = None
+        """Start of the complete backing storage; unlike ``ptr``, this may precede the array's first element."""
+
+        self._storage_nbytes: int | None = None
+        """Total backing-storage size; unlike ``capacity``, this includes bytes preceding ``ptr``."""
 
         # canonicalize dtype
         if dtype is int:
@@ -3988,8 +4003,15 @@ class array(Array[DType, NDim]):
                 arr_strides = self.strides
                 descr = None
 
+            if self.ptr:
+                data_ptr = self.ptr
+            elif self.size == 0:
+                data_ptr = ctypes.addressof(_ARRAY_INTERFACE_EMPTY_DATA)
+            else:
+                data_ptr = 0
+
             self._array_interface = {
-                "data": (self.ptr if self.ptr is not None else 0, False),
+                "data": (data_ptr, False),
                 "shape": tuple(arr_shape),
                 "strides": tuple(arr_strides),
                 "typestr": type_typestr(self.dtype),
@@ -6157,6 +6179,9 @@ class Mesh:
         self._velocities = velocities
         self.indices = indices
         self.groups = groups
+        self.support_winding_number = support_winding_number
+        """Whether the mesh was built with the data structures that
+        :func:`warp.mesh_query_point_sign_winding_number` requires."""
         self.runtime = warp._src.context.runtime
 
         if bvh_constructor is None:

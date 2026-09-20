@@ -211,7 +211,6 @@ add_example_test(
     test_options={"headless": True},
     test_options_cpu={"num_frames": 100},
 )
-add_example_test(TestCoreExamples, name="core.example_marching_cubes", devices=cuda_test_devices)
 add_example_test(TestCoreExamples, name="core.example_mesh", devices=test_devices, test_options={"usd_required": True})
 add_example_test(
     TestCoreExamples, name="core.example_mesh_intersect", devices=test_devices, test_options={"usd_required": True}
@@ -273,6 +272,25 @@ add_example_test(
 )
 
 
+class TestGeometryExamples(unittest.TestCase):
+    pass
+
+
+add_example_test(TestGeometryExamples, name="geometry.example_isosurface", devices=cuda_test_devices)
+add_example_test(
+    TestGeometryExamples,
+    name="geometry.example_sparse_marching_cubes",
+    devices=cuda_test_devices,
+    test_options={"num_frames": 3, "usd_required": True},
+)
+add_example_test(
+    TestGeometryExamples,
+    name="geometry.example_swept_volume",
+    devices=test_devices,
+    test_options={"usd_required": True},
+)
+
+
 class TestOptimExamples(unittest.TestCase):
     pass
 
@@ -288,7 +306,21 @@ add_example_test(
     TestOptimExamples,
     name="optim.example_fluid_checkpoint",
     devices=cuda_test_devices_with_mempool,
-    test_options={"headless": True, "train_iters": 5, "num_frames": 300, "pillow_required": True},
+    test_options={"headless": True, "train_iters": 5, "num_frames": 301, "pillow_required": True},
+)
+add_example_test(
+    TestOptimExamples,
+    name="optim.example_fluid_checkpoint_custom_backward",
+    devices=test_devices,
+    test_options={
+        # Exercise a shorter final segment, both scratch buffers, and repeated execution.
+        "headless": True,
+        "train_iters": 2,
+        "num_frames": 5,
+        "pressure_iterations": 3,
+        "segment_size": 3,
+        "pillow_required": True,
+    },
 )
 add_example_test(
     TestOptimExamples,

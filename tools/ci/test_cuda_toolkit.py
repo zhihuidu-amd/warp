@@ -106,6 +106,35 @@ class ToolkitTestCase(unittest.TestCase):
         self.directory = Path(self.temporary_directory.name)
 
 
+class RepositoryConfigTests(unittest.TestCase):
+    def test_cuda_13_supports_windows_arm64(self) -> None:
+        """Resolve the repository CUDA 13 bundle for Windows ARM64."""
+        requirements = ctk.load_requirements(ctk.REQUIREMENTS_PATH)
+        lock = ctk.load_lock(ctk.LOCK_PATH)
+        version = max(
+            (version for version in requirements.releases if version.startswith("13.")),
+            key=lambda version: tuple(int(part) for part in version.split(".")),
+        )
+        release = requirements.releases[version]
+
+        self.assertIn("windows-arm64", release.platforms)
+
+        bundle = ctk.resolve_bundle(requirements, lock, version, "windows-arm64")
+        self.assertEqual(
+            tuple(archive.component for archive in bundle.archives),
+            (
+                "cccl",
+                "cuda_crt",
+                "cuda_cudart",
+                "cuda_nvcc",
+                "cuda_nvrtc",
+                "libnvvm",
+                "libnvptxcompiler",
+                "libnvjitlink",
+            ),
+        )
+
+
 class ConfigTests(ToolkitTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -146,6 +175,25 @@ class ConfigTests(ToolkitTestCase):
         }
         write_json(self.requirements_path, self.requirements_data)
         write_json(self.lock_path, self.lock_data)
+
+    def activate(self, toolkit: Path) -> int:
+        """Run the activation CLI against the test repository configuration."""
+        with (
+            mock.patch.object(ctk, "REQUIREMENTS_PATH", self.requirements_path),
+            mock.patch.object(ctk, "LOCK_PATH", self.lock_path),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ):
+            return ctk.main(
+                [
+                    "activate",
+                    "--version",
+                    "13.0.2",
+                    "--platform",
+                    "linux-x86_64",
+                    "--cuda-path",
+                    str(toolkit),
+                ]
+            )
 
     def test_generate_lock_uses_manifest_keys(self) -> None:
         """Generate lock records from NVIDIA manifest keys."""
@@ -214,7 +262,7 @@ class ConfigTests(ToolkitTestCase):
         values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
         self.assertRegex(
             values["cache-key"],
-            r"^warp-cuda-toolkit-v1-13\.0\.2-linux-x86_64-[0-9a-f]{64}$",
+            r"^warp-cuda-toolkit-v2-13\.0\.2-linux-x86_64-[0-9a-f]{64}$",
         )
         self.assertEqual(
             Path(values["cuda-path"]).parent,
@@ -258,6 +306,48 @@ class ConfigTests(ToolkitTestCase):
 
         with self.assertRaisesRegex(ctk.ToolkitConfigError, "extra bundles"):
             ctk.validate_lock(requirements, lock)
+
+    def test_activate_rejects_mismatched_bundle_metadata(self) -> None:
+        """Reject activation when installed metadata does not match the lock."""
+        bundle = ctk.resolve_bundle(
+            ctk.load_requirements(self.requirements_path),
+            ctk.load_lock(self.lock_path),
+            "13.0.2",
+            "linux-x86_64",
+        )
+        toolkit = make_toolkit(self.directory, "linux-x86_64")
+        write_json(
+            toolkit / ctk.PACKAGE_METADATA_NAME,
+            {
+                "schema_version": 1,
+                "cuda_version": "13.0.1",
+                "platform": "linux-x86_64",
+                "bundle_digest": bundle.digest,
+            },
+        )
+
+        self.assertEqual(self.activate(toolkit), 1)
+
+    def test_activate_accepts_matching_bundle_metadata(self) -> None:
+        """Activate a Toolkit whose installed metadata matches the lock."""
+        bundle = ctk.resolve_bundle(
+            ctk.load_requirements(self.requirements_path),
+            ctk.load_lock(self.lock_path),
+            "13.0.2",
+            "linux-x86_64",
+        )
+        toolkit = make_toolkit(self.directory, "linux-x86_64")
+        write_json(
+            toolkit / ctk.PACKAGE_METADATA_NAME,
+            {
+                "schema_version": 1,
+                "cuda_version": "13.0.2",
+                "platform": "linux-x86_64",
+                "bundle_digest": bundle.digest,
+            },
+        )
+
+        self.assertEqual(self.activate(toolkit), 0)
 
 
 class DownloadTests(ToolkitTestCase):
@@ -313,6 +403,34 @@ class DownloadTests(ToolkitTestCase):
 
 
 class InstallTests(ToolkitTestCase):
+    def test_record_bundle_metadata(self) -> None:
+        """Record the exact locked identity of an installed Toolkit."""
+        payload = tar_archive("cuda_nvcc", {"include/cuda.h": b"header"})
+        bundle = ctk.Bundle(
+            "13.0.2",
+            "linux-x86_64",
+            (archive_record(payload),),
+        )
+        destination = self.directory / "cuda"
+
+        ctk.install_bundle(
+            bundle,
+            destination,
+            opener=opener_returning(payload),
+        )
+
+        metadata_path = destination / ctk.PACKAGE_METADATA_NAME
+        self.assertTrue(metadata_path.is_file())
+        self.assertEqual(
+            json.loads(metadata_path.read_text(encoding="utf-8")),
+            {
+                "schema_version": 1,
+                "cuda_version": "13.0.2",
+                "platform": "linux-x86_64",
+                "bundle_digest": bundle.digest,
+            },
+        )
+
     def test_assemble_components_in_order(self) -> None:
         """Assemble trusted components in lock order."""
         first = tar_archive(
@@ -406,6 +524,40 @@ class InstallTests(ToolkitTestCase):
 
 
 class PackageTests(ToolkitTestCase):
+    def test_unpack_prior_bundle_digest_schema(self) -> None:
+        """Unpack a Toolkit package created before cache schema version 2."""
+        bundle = ctk.Bundle(
+            "13.0.2",
+            "linux-x86_64",
+            (archive_record(b"locked"),),
+        )
+        metadata = {
+            "schema_version": 1,
+            "cuda_version": "13.0.2",
+            "platform": "linux-x86_64",
+            "bundle_digest": "2937abb5c98a36332f7834f7cbb3149b5e498f8ecbcc22aed283ef0c74e5b858",
+        }
+        package = self.directory / "cuda-toolkit.tar.xz"
+        package.write_bytes(
+            tar_archive(
+                ctk.PACKAGE_ROOT,
+                {
+                    ctk.PACKAGE_METADATA_NAME: (json.dumps(metadata) + "\n").encode(),
+                    "include/cuda.h": b"header",
+                    "bin/nvcc": b"#!/bin/sh\nexit 0\n",
+                },
+            )
+        )
+        destination = self.directory / "destination"
+
+        try:
+            result = ctk.unpack_toolkit(bundle, package, destination)
+        except ctk.ToolkitConfigError as error:
+            self.fail(f"Prior-schema package was rejected: {error}")
+
+        self.assertEqual(result, destination.resolve())
+        self.assertEqual((destination / "include/cuda.h").read_bytes(), b"header")
+
     def test_reject_mismatched_package_without_replacement(self) -> None:
         """Reject a mismatched package without replacing the destination."""
         source = make_toolkit(self.directory / "source", "linux-x86_64")

@@ -14,13 +14,15 @@ from enum import IntEnum
 from typing import Any
 
 import warp as wp
-from warp._src.codegen import _SCALAR_TID_MAX_EXTENT, get_full_arg_spec, make_full_qualified_name
+from warp._src.codegen import _TID_MAX_EXTENT, get_full_arg_spec, make_full_qualified_name
 from warp._src.context import (
     CudaMemcpyKind,
     _build_kernel_launch_bounds,
     _raise_cuda_launch_error,
+    _resolve_launch_block_dim,
     _validate_cluster_launch,
     invoke,
+    invoke_cpu_blocks,
 )
 from warp._src.jax import get_jax_device
 from warp._src.logger import log_warning
@@ -142,10 +144,7 @@ ModulePreloadMode = JaxModulePreloadMode
 
 def _get_ffi_block_dim(device, block_dim=None):
     """Resolve the FFI block dimension for ``device``."""
-    if device.is_cpu:
-        # Remove this override if CPU launches gain configurable block dimensions.
-        return 1
-    return 256 if block_dim is None else block_dim
+    return _resolve_launch_block_dim(device, block_dim)
 
 
 def _load_ffi_module(module, device, block_dim=None):
@@ -163,8 +162,8 @@ def _validate_ffi_kernel_launch_bounds(dim, kernel, block_dim=None) -> None:
     kernel.module.get_module_hash(cuda_block_dim)
     _build_kernel_launch_bounds(dim, kernel, cuda_block_dim)
 
-    leading_extent = dim[0] if dim else 1
-    if leading_extent > _SCALAR_TID_MAX_EXTENT and cuda_block_dim != 1:
+    tid_extents = dim[: kernel.adj.kernel_dim]
+    if any(extent > _TID_MAX_EXTENT for extent in tid_extents) and cuda_block_dim != 1:
         _build_kernel_launch_bounds(dim, kernel, 1)
 
 
@@ -276,7 +275,7 @@ class FfiKernel:
         in_out_argnames_list = in_out_argnames or []
         in_out_argnames = set(in_out_argnames_list)
         if len(in_out_argnames_list) != len(in_out_argnames):
-            raise AssertionError("in_out_argnames must not contain duplicate names")
+            raise ValueError("in_out_argnames must not contain duplicate names")
 
         self.num_kernel_args = len(kernel.adj.args)
         self.num_in_out = len(in_out_argnames)
@@ -306,7 +305,7 @@ class FfiKernel:
         for i in range(self.num_inputs, self.num_kernel_args):
             arg_name = kernel.adj.args[i].label
             if arg_name in in_out_argnames:
-                raise AssertionError(
+                raise ValueError(
                     f"Expected an output-only argument for argument {arg_name}."
                     " in_out arguments should be placed before output-only arguments."
                 )
@@ -474,8 +473,16 @@ class FfiKernel:
                 num_outputs = call_frame.contents.rets.size
                 outputs = ctypes.cast(call_frame.contents.rets.rets, ctypes.POINTER(ctypes.POINTER(XLA_FFI_Buffer)))
 
-                assert num_inputs == self.num_inputs
-                assert num_outputs == self.num_outputs
+                if num_inputs != self.num_inputs:
+                    return create_invalid_argument_ffi_error(
+                        call_frame.contents.api,
+                        f"Expected {self.num_inputs} JAX FFI input buffers, got {num_inputs}",
+                    )
+                if num_outputs != self.num_outputs:
+                    return create_invalid_argument_ffi_error(
+                        call_frame.contents.api,
+                        f"Expected {self.num_outputs} JAX FFI output buffers, got {num_outputs}",
+                    )
 
                 arg_refs = []
                 batch_size = None
@@ -560,14 +567,18 @@ class FfiKernel:
                         # roll batch size into the first launch dimension
                         launch_dims = (batch_size * launch_dims[0], *launch_dims[1:])
 
-                # Revalidate here because vmap can grow the leading extent at runtime.
+                # Revalidate here because vmap can grow an extent visible through wp.tid() at runtime.
                 launch_bounds = _build_kernel_launch_bounds(launch_dims, self.kernel, block_dim)
 
                 if platform == _FFI_PLATFORM_CPU:
                     hooks = module_exec.get_kernel_hooks(self.kernel)
                     if hooks.forward is None:
                         raise RuntimeError("Failed to find CPU kernel entry point")
-                    invoke(self.kernel, hooks, [launch_bounds, *arg_refs], adjoint=False)
+                    params = [launch_bounds, *arg_refs]
+                    if block_dim > 1:
+                        invoke_cpu_blocks(self.kernel, hooks, params, adjoint=False)
+                    else:
+                        invoke(self.kernel, hooks, params, adjoint=False)
                     return None
 
                 kernel_params = (ctypes.c_void_p * (1 + self.num_kernel_args))(
@@ -672,7 +683,7 @@ class FfiCallable:
         in_out_argnames_list = in_out_argnames or []
         in_out_argnames = set(in_out_argnames_list)
         if len(in_out_argnames_list) != len(in_out_argnames):
-            raise AssertionError("in_out_argnames must not contain duplicate names")
+            raise ValueError("in_out_argnames must not contain duplicate names")
 
         # get arguments and annotations
         argspec = get_full_arg_spec(func)
@@ -711,7 +722,7 @@ class FfiCallable:
                 self.args.append(arg)
 
             if arg.in_out and arg_idx >= self.num_inputs:
-                raise AssertionError(
+                raise ValueError(
                     f"Expected an output-only argument for argument {arg_name}."
                     " in_out arguments should be placed before output-only arguments."
                 )
@@ -898,8 +909,16 @@ class FfiCallable:
                 num_outputs = call_frame.contents.rets.size
                 outputs = ctypes.cast(call_frame.contents.rets.rets, ctypes.POINTER(ctypes.POINTER(XLA_FFI_Buffer)))
 
-                assert num_inputs == self.num_inputs
-                assert num_outputs == self.num_outputs
+                if num_inputs != self.num_inputs:
+                    return create_invalid_argument_ffi_error(
+                        call_frame.contents.api,
+                        f"Expected {self.num_inputs} JAX FFI input buffers, got {num_inputs}",
+                    )
+                if num_outputs != self.num_outputs:
+                    return create_invalid_argument_ffi_error(
+                        call_frame.contents.api,
+                        f"Expected {self.num_outputs} JAX FFI output buffers, got {num_outputs}",
+                    )
 
                 if platform == _FFI_PLATFORM_CPU:
                     if self.graph_mode not in (JaxCallableGraphMode.NONE, JaxCallableGraphMode.JAX):
@@ -1356,11 +1375,12 @@ def jax_kernel(
         enable_backward: Enable automatic differentiation for this kernel.
         has_side_effect: Whether the custom call has side effects. When True,
             the FFI call will be executed even when the outputs are not used.
-        block_dim: Specify the number of threads per block for CUDA execution.
-            When ``None``, CUDA uses 256 threads per block. CPU execution always
-            uses one thread per block. The value is fixed when the wrapper is
-            constructed and is shared by forward and adjoint launches when
-            ``enable_backward=True``.
+        block_dim: Specify the number of threads per block. When ``None``, CUDA
+            uses 256 threads per block and CPU uses one. Explicit CPU block
+            dimensions greater than one are honored when
+            ``warp.config.enable_cpu_blocks`` is ``True``. The value is fixed
+            when the wrapper is constructed and is shared by forward and
+            adjoint launches when ``enable_backward=True``.
 
     Limitations:
         - All kernel arguments must be contiguous arrays or scalars.
@@ -1467,7 +1487,7 @@ def jax_kernel(
     # Reuse `hashable_launch_dims` (computed above for the cache key path)
     # so 1-D integer and sequence forms are normalized identically.
     _user_launch_dims = hashable_launch_dims if launch_dims is not None else None
-    _launch_block_dim = 256 if block_dim is None else block_dim
+    _launch_block_dim = block_dim
 
     def _resolve_launch_dims(call_args):
         if _user_launch_dims is not None:

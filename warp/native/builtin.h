@@ -21,6 +21,20 @@
 #define CUDA_CALLABLE_DEVICE __device__
 #endif
 
+// Cross-compiler inline control for generated functions and native helpers.
+// CUDA compilation uses Clang-style attributes because Warp's JIT omits the
+// toolkit header that normally defines __noinline__ and __forceinline__.
+#if defined(__CUDA_ARCH__) || defined(__CUDACC_RTC__) || (defined(__clang__) && defined(__CUDA__))
+#define WP_NOINLINE __attribute__((noinline))
+#define WP_FORCEINLINE inline __attribute__((always_inline))
+#elif defined(_MSC_VER)
+#define WP_NOINLINE __declspec(noinline)
+#define WP_FORCEINLINE __forceinline
+#else
+#define WP_NOINLINE __attribute__((noinline))
+#define WP_FORCEINLINE inline __attribute__((always_inline))
+#endif
+
 // Tile block dimension used while building the warp core library
 #ifndef WP_TILE_BLOCK_DIM
 #define WP_TILE_BLOCK_DIM 256
@@ -1967,7 +1981,7 @@ static constexpr int LAUNCH_MAX_DIMS = 4;  // should match types.py
 template <int N> struct launch_bounds_t {
     static_assert(N > 0 && N <= LAUNCH_MAX_DIMS, "launch_bounds_t<N> only supports 1-4 dimensions");
 
-    int shape[N];
+    uint32_t shape[N];
     size_t size;
     size_t coord_mult;  // threads sharing each coord tuple; launch_coord divides linear by this before unraveling
 };
@@ -2015,7 +2029,7 @@ inline CUDA_CALLABLE int block_dim()
 #if defined(__CUDA_ARCH__)
     return blockDim.x;
 #else
-    return 1;
+    return WP_TILE_BLOCK_DIM;
 #endif
 }
 
