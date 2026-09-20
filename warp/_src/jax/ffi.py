@@ -18,6 +18,7 @@ from warp._src.codegen import _TID_MAX_EXTENT, get_full_arg_spec, make_full_qual
 from warp._src.context import (
     CudaMemcpyKind,
     _build_kernel_launch_bounds,
+    _check_cuda_launch_smem,
     _raise_cuda_launch_error,
     _resolve_launch_block_dim,
     _validate_cluster_launch,
@@ -594,6 +595,9 @@ class FfiKernel:
                 # reject non-cluster-aligned grids with a clear Python error instead
                 # of a cryptic native CUDA error (configured block_dim, max_blocks=0 below)
                 _validate_cluster_launch(hooks.cluster_dim, launch_bounds.size, block_dim, 0)
+
+                # refuse a launch whose dynamic shared memory could not be configured
+                _check_cuda_launch_smem(self.kernel, device, hooks, False)
 
                 # launch the kernel (cluster_dim is cached on the hooks at load time)
                 if wp._src.context.runtime.core.wp_cuda_launch_kernel(

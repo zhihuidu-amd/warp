@@ -11207,6 +11207,25 @@ def _raise_cuda_launch_error(kernel: Kernel, device: Device, hooks: KernelHooks,
     raise RuntimeError(f"Error launching kernel: {kernel.key} on device {device}: {err}")
 
 
+def _check_cuda_launch_smem(kernel: Kernel, device: Device, hooks: KernelHooks, adjoint: bool) -> None:
+    """Refuse a launch whose dynamic shared memory could not be configured.
+
+    Call immediately before ``wp_cuda_launch_kernel``. As
+    :func:`_raise_cuda_launch_error` records, such a kernel fails *every* launch, since the
+    same byte count goes to the launcher -- so dispatching it can only produce the error
+    this raises. The message is identical either way; the launch is simply not attempted.
+
+    The check is not merely tidy. It assumes the launcher reports the rejection back to the
+    caller, which is true of ``cuLaunchKernel`` but not of HIP: there an over-budget request
+    aborts the queue asynchronously with ``HSA_STATUS_ERROR_INVALID_ALLOCATION``, taking the
+    process down before the failure path can run. Refusing up front is what makes the
+    diagnostic reachable on that backend.
+    """
+    shortfall = hooks.backward_smem_shortfall if adjoint else hooks.forward_smem_shortfall
+    if shortfall is not None:
+        _raise_cuda_launch_error(kernel, device, hooks, adjoint)
+
+
 class Launch:
     """Represent all data required for a kernel launch so that launches can be replayed quickly.
 
@@ -11604,6 +11623,7 @@ class Launch:
                 apic_info_ptr = ctypes.byref(apic_info)
 
             if self.adjoint:
+                _check_cuda_launch_smem(self.kernel, self.device, self.hooks, True)
                 if runtime.core.wp_cuda_launch_kernel(
                     self.device.context,
                     self.hooks.backward,
@@ -11619,6 +11639,7 @@ class Launch:
                 ):
                     _raise_cuda_launch_error(self.kernel, self.device, self.hooks, True)
             else:
+                _check_cuda_launch_smem(self.kernel, self.device, self.hooks, False)
                 if runtime.core.wp_cuda_launch_kernel(
                     self.device.context,
                     self.hooks.forward,
@@ -12175,6 +12196,7 @@ def launch(
                             adj_args=adj_args,
                         )
                         apic_info_ptr = ctypes.byref(apic_info)
+                    _check_cuda_launch_smem(kernel, device, hooks, True)
                     if runtime.core.wp_cuda_launch_kernel(
                         device.context,
                         hooks.backward,
@@ -12223,6 +12245,7 @@ def launch(
                             False,
                         )
                         apic_info_ptr = ctypes.byref(apic_info)
+                    _check_cuda_launch_smem(kernel, device, hooks, False)
                     if runtime.core.wp_cuda_launch_kernel(
                         device.context,
                         hooks.forward,

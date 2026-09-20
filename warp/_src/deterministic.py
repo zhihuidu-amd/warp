@@ -2209,6 +2209,7 @@ def launch_deterministic(
     from warp._src import context as warp_context  # noqa: PLC0415
     from warp._src.context import (  # noqa: PLC0415
         _build_cuda_kernel_params,
+        _check_cuda_launch_smem,
         _raise_cuda_launch_error,
         det_counter_buf_t,
         det_scatter_buf_t,
@@ -2236,6 +2237,11 @@ def launch_deterministic(
             "APIC serialization is not currently supported for deterministic CUDA kernels. "
             "Capture with apic=False, or disable deterministic mode for kernels captured with apic=True."
         )
+
+    # Checked here rather than inside do_cuda_launch below: shared_memory_bytes is
+    # invariant across the passes, so a doomed launch is known before the scatter
+    # buffers are allocated and the sort is run.
+    _check_cuda_launch_smem(kernel, device, hooks, adjoint)
 
     adj_args = [] if adj_args is None else list(adj_args)
 
