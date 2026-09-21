@@ -1334,6 +1334,13 @@ class TestTileSharedMemoryMessages(unittest.TestCase):
 
 devices = get_cuda_test_devices()
 
+# HIP has no deterministic launch path to report from: build_lib.py drops deterministic.cu
+# from HIP builds, and launch() refuses a deterministic kernel outright rather than routing
+# it through launch_deterministic(). That refusal is itself a RuntimeError, so the test would
+# not fail on a missing error -- it would fail on the wrong message, which reads as a defect
+# in the shared-memory diagnostic rather than as a mode that does not exist here.
+deterministic_devices = [d for d in devices if not d.is_hip]
+
 
 class TestTileSharedMemory(unittest.TestCase):
     pass
@@ -1563,7 +1570,7 @@ add_function_test(
     TestTileSharedMemory,
     "test_tile_shared_mem_deterministic_launch_message",
     test_tile_shared_mem_deterministic_launch_message,
-    devices=devices,
+    devices=deterministic_devices,
 )
 
 
