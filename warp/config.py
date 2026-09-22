@@ -338,18 +338,21 @@ sharing the process with a framework that owns its own GPU allocator).
 """
 
 hip_conditional_max_iters: int = int(_os.environ.get("WARP_HIP_CONDITIONAL_MAX_ITERS", "32"))
-"""Iteration bound for :func:`warp.capture_while` on HIP devices.
+"""Fallback iteration bound for :func:`warp.capture_while` on HIP devices.
 
 HIP has no conditional graph node, so Warp lowers a conditional region to a
 static unroll of predicated body copies. This is the number of copies, and
 therefore a hard cap: a loop that needs more iterations than this stops early
-with an under-iterated result. Set it to at least the caller's own iteration
-budget.
+with an under-iterated result.
 
-Warp reports every truncation on ``stderr`` (once per device per process) and
-counts them, so a bound that is too low is loud rather than silent. The cost of
-raising it is graph size and a dispatch per predicated copy, not GPU work --
-copies past convergence self-skip.
+**Prefer the ``max_iters`` argument of :func:`warp.capture_while`.** Only the
+caller knows its own iteration budget, and no single process-global number fits
+every loop: too low truncates, and too high costs graph size and a dispatch per
+unused copy. This value is used only when a caller passes no ``max_iters``, and
+Warp warns once per process when that happens under capture on HIP.
+
+Warp also reports every truncation on ``stderr`` (once per device per process)
+and counts them, so a bound that is too low is loud rather than silent.
 
 Ignored on CUDA, where a conditional node re-evaluates until the condition goes
 false and has no bound.

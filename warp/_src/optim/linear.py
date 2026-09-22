@@ -2165,12 +2165,22 @@ def _run_capturable_loop(
         if callback_launch is not None:
             callback_launch.launch()
 
+    # The number of cycles this loop can run, which is the same trip count the eager
+    # branch below takes. _update_condition advances cur_iter by cycle_size per cycle
+    # and clears the condition once it reaches maxiter, so the condition goes false
+    # after exactly this many body invocations. Backends that unroll a conditional
+    # region (HIP) need the budget up front; on CUDA it is ignored. Clamped to 1 so a
+    # degenerate maxiter of 0 behaves as it did before (the pre-loop condition tick
+    # already cleared the condition, so the single copy does nothing) rather than
+    # raising on a bound of zero.
+    max_cycles = max(1, len(range(0, maxiter, cycle_size)))
+
     if use_cuda_graph and device.is_cuda:
         if device.is_capturing:
-            wp.capture_while(condition, do_cycle_with_condition)
+            wp.capture_while(condition, do_cycle_with_condition, max_iters=max_cycles)
         else:
             with wp.ScopedCapture(device=device) as capture:
-                wp.capture_while(condition, do_cycle_with_condition)
+                wp.capture_while(condition, do_cycle_with_condition, max_iters=max_cycles)
             wp.capture_launch(capture.graph)
     else:
         for _ in range(0, maxiter, cycle_size):

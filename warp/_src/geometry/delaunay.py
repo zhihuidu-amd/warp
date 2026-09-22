@@ -677,8 +677,10 @@ def delaunay_edge_flip(
 
     # Device-driven convergence loop. Under CUDA graph capture this records
     # conditional graph nodes; otherwise wp.capture_while reads the condition
-    # back to the host to decide when to stop.
-    wp.capture_while(condition, _flip_pass)
+    # back to the host to decide when to stop. _record_pass clears the condition
+    # once pass_count reaches max_passes, so max_passes is this loop's budget --
+    # backends that unroll a conditional region (HIP) need it up front.
+    wp.capture_while(condition, _flip_pass, max_iters=max_passes)
 
     return total_flips
 

@@ -14219,7 +14219,13 @@ def capture_if(
         )
 
 
-def capture_while(condition: warp.array[int], while_body: Callable | Graph, stream: Stream | None = None, **kwargs):
+def capture_while(
+    condition: warp.array[int],
+    while_body: Callable | Graph,
+    stream: Stream | None = None,
+    max_iters: int | None = None,
+    **kwargs,
+):
     """Create a dynamic loop based on a condition.
 
     The condition value is retrieved from the first element of the ``condition`` array.
@@ -14235,6 +14241,14 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
         condition: Warp array holding the condition value.
         while_body: A callback function or :class:`Graph` to execute while the loop condition is True.
         stream: The CUDA stream where the condition was written. If None, use the current stream on the device where ``condition`` resides.
+        max_iters: The caller's own iteration budget, used only when capturing a graph on a HIP device.
+            HIP has no conditional graph node, so a while-region is lowered as a static unroll of this many
+            predicated body copies, and a loop that needs more iterations stops early with an under-iterated
+            result. Pass the largest number of iterations the body can require. If None, Warp falls back to
+            :data:`warp.config.hip_conditional_max_iters`, which is a process-global default and is unlikely
+            to match any particular loop. Ignored on CUDA, where a conditional node re-evaluates until the
+            condition goes false and has no bound, and ignored outside of graph capture, where the condition
+            is evaluated on the host and the loop runs the right number of times regardless.
 
     Any additional keyword arguments are forwarded to the callback function.
     """
@@ -14242,6 +14256,9 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
     # check condition data type
     if not isinstance(condition, warp.array) or condition.dtype is not warp.int32:
         raise TypeError("Condition must be a Warp array of int32 with a single element")
+
+    if max_iters is not None and max_iters < 1:
+        raise ValueError(f"capture_while(): max_iters must be at least 1, got {max_iters}")
 
     device = condition.device
 
@@ -14333,15 +14350,26 @@ def capture_while(condition: warp.array[int], while_body: Callable | Graph, stre
 
     # Bound the unroll. On HIP this is a hard cap, not a hint: the region emits
     # exactly this many body copies and a loop that wants more stops early with an
-    # under-iterated result. The native side counts and reports every such
-    # truncation, but the bound still has to be raised by whoever knows the
-    # iteration budget, and warp.config is the only channel that reaches here
-    # without changing this signature (**kwargs belongs to the body).
+    # under-iterated result. Only the caller knows its own iteration budget, so
+    # max_iters is the channel for it; warp.config is the fallback for callers that
+    # do not pass one, and a process-global number is unlikely to fit any particular
+    # loop in either direction -- too low truncates, too high pays a dispatch per
+    # unused copy.
     #
     # A no-op on CUDA, where a conditional node has no bound.
-    if not runtime.core.wp_cuda_graph_set_max_iters(
-        stream.cuda_stream, ctypes.c_uint(warp.config.hip_conditional_max_iters)
-    ):
+    if max_iters is None:
+        if runtime.is_hip:
+            log_warning(
+                "capture_while() was called during a graph capture on a HIP device without max_iters. "
+                "HIP lowers the loop as a static unroll, so the body will be emitted exactly "
+                f"{warp.config.hip_conditional_max_iters} times (warp.config.hip_conditional_max_iters) and a "
+                "loop needing more iterations will stop early with an under-iterated result. Pass "
+                "max_iters=<your iteration budget> to capture_while(). Reported once per process.",
+                once=True,
+            )
+        max_iters = warp.config.hip_conditional_max_iters
+
+    if not runtime.core.wp_cuda_graph_set_max_iters(stream.cuda_stream, ctypes.c_uint(max_iters)):
         raise RuntimeError(f"Failed to set conditional iteration bound on device {device}")
 
     # insert conditional while-node

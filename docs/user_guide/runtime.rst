@@ -1847,14 +1847,24 @@ condition value as a counter:
 .. warning::
     **HIP/ROCm has no conditional graph node.** Inside an active graph capture on a
     HIP device, :func:`wp.capture_while <warp.capture_while>` is lowered by unrolling
-    the loop body into the parent graph a fixed number of times (32 unless the unroll
-    bound was lowered for that stream), with a device-side refresh of the condition
-    between copies. Warp-generated kernels read that condition and return immediately
-    when it is false, so the loop stops doing work at the right iteration and a
-    condition that is already false on entry runs zero iterations — the same answers
-    CUDA produces. The cost model differs, though: every copy is still *dispatched*,
-    so a loop that converges early pays the launch overhead of the remaining copies.
-    Lower the bound with the unroll-bound control when the iteration budget is known.
+    the loop body into the parent graph a fixed number of times, with a device-side
+    refresh of the condition between copies. Warp-generated kernels read that condition
+    and return immediately when it is false, so the loop stops doing work at the right
+    iteration and a condition that is already false on entry runs zero iterations — the
+    same answers CUDA produces. The cost model differs, though: every copy is still
+    *dispatched*, so a loop that converges early pays the launch overhead of the
+    remaining copies.
+
+    **The unroll count is a hard cap, so pass the** ``max_iters`` **argument.** A loop
+    that needs more iterations than the bound stops early and returns an under-iterated
+    result. ``max_iters`` is the caller's own iteration budget — the largest number of
+    times the body can be required to run. Callers that pass nothing fall back to
+    :data:`warp.config.hip_conditional_max_iters` (32 by default), which is a
+    process-global number and fits no particular loop: too low truncates the result, and
+    too high pays a dispatch per unused copy. Warp warns once per process when a capture
+    on HIP reaches this path without ``max_iters``, counts every truncation on device,
+    and reports it on ``stderr`` once per device — see
+    :func:`wp.conditional_graph_truncations <warp.conditional_graph_truncations>`.
 
     Three things are still not predicated on HIP, because nothing in the unrolled
     copy can be rebound after the fact:
