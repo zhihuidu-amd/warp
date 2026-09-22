@@ -3057,9 +3057,13 @@ class TestTexture(unittest.TestCase):
     pass
 
 
-# Register tests - textures work on both CPU and CUDA devices
-cuda_devices = get_selected_cuda_test_devices()
-all_devices = get_test_devices()
+# Register tests - textures work on CPU and CUDA devices, but not on HIP:
+# warp/native/texture.cpp refuses every texture creation on a ROCm device, so
+# each registration below would raise the same "Textures are not supported"
+# error. Filter once here rather than at each one; the CPU registrations are
+# untouched and a CUDA build sees an unchanged list.
+cuda_devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
+all_devices = [device for device in get_test_devices() if not device.is_hip]
 
 # Core texture tests - run on all devices (CPU + CUDA)
 add_function_test(TestTexture, "test_texture1d_1channel", test_texture1d_1channel, devices=all_devices)

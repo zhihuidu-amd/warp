@@ -30,9 +30,14 @@ def _bfloat16_numpy_to_float32(values):
     return _np_bfloat16_bits_to_float32(bits)
 
 
-cuda_devices = get_selected_cuda_test_devices()
+# Warp's HIP backend is built without deterministic.cu, so every kernel that
+# needs the deterministic launch path is refused at launch time (see the
+# RuntimeError raised in warp/_src/context.py). Filtering the devices here
+# rather than letting each test raise keeps the failure surface honest: the
+# feature is unavailable, not broken. A CUDA build sees an unchanged list.
+cuda_devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
 bfloat16_cuda_devices = [device for device in cuda_devices if device.arch >= 80]
-all_devices = get_test_devices()
+all_devices = [device for device in get_test_devices() if not device.is_hip]
 cpu_device = wp.get_device("cpu")
 REPEAT_COUNT = 3
 

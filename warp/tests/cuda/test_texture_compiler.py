@@ -460,7 +460,11 @@ class TestTextureCompiler(unittest.TestCase):
                         self.assertNotIn("sample_base_1d", output_path.read_text())
 
 
-devices = get_selected_cuda_test_devices()
+# Textures need CUDA array / texture-object support, which the HIP backend does
+# not provide (warp/native/texture.cpp refuses outright). Drop HIP devices here
+# so the unsupported surface does not read as a compiler regression; a CUDA
+# build gets the same list it always did.
+devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
 for cuda_output, optimization_level in COMPILER_CONFIGS:
     for dimension, texture_cls, data_cls, shape in DIMENSION_CASES:
         for selected_sample, width_pair in WIDTH_CASES:
