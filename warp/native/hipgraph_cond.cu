@@ -1371,11 +1371,41 @@ hipError_t spliceBody(hipStream_t stream, CondRegion& region, hipGraph_t bodyGra
         deps = std::move(tail);
         ++embedded;
 
-        /* No refresh after the final body: nothing would consume it. Emit the
-         * truncation check there instead -- it is the one thing that does still
-         * need to know whether the condition survived the last copy. */
+        /* No body copy is left to consume a refresh after the final one -- but
+         * the truncation check still reads the slot, and it has to see the
+         * condition as of AFTER the last copy, not before it. Skipping the
+         * refresh here made the check one copy stale: a loop that used exactly
+         * its budget converged on its final copy and was still reported as
+         * truncated, and at maxIters == 1 the check saw Begin's seed because no
+         * refresh had ever run. Measured on gfx942 (job 67976340): a 7-iteration
+         * loop at max_iters=7 answered 7 and reported a truncation. */
         if (i + 1 == region.maxIters) {
             if (region.type == hipGraphCondTypeWhile && region.handle->diag) {
+                /* Same conjunction as the between-copy refresh above, for the
+                 * same reason. Gated on the check's own condition so the If
+                 * path -- maxIters 1, no check node -- emits nothing new. */
+                hipKernelNodeParams fkp;
+                std::memset(&fkp, 0, sizeof(fkp));
+                void* fargs[3] = { &region.handle->slot, &region.condition, &region.handle->enclosingGuard };
+                fkp.func = reinterpret_cast<void*>(hgc_set_condition);
+                fkp.gridDim = dim3(1);
+                fkp.blockDim = dim3(1);
+                fkp.sharedMemBytes = 0;
+                fkp.kernelParams = fargs;
+                fkp.extra = nullptr;
+
+                hipGraphNode_t finalCondNode = nullptr;
+                hipError_t ferr = hipGraphAddKernelNode(
+                    &finalCondNode, region.parentGraph, deps.empty() ? nullptr : deps.data(), deps.size(), &fkp
+                );
+                if (ferr == hipSuccess) {
+                    deps.assign(1, finalCondNode);
+                } else {
+                    /* Without it the check goes back to being one copy stale --
+                     * noisy, but the unroll itself is unaffected. Log and carry on. */
+                    HGC_LOG("splice: final condition-refresh node -> %d (%s)", (int)ferr, hipGetErrorString(ferr));
+                }
+
                 hipKernelNodeParams ckp;
                 std::memset(&ckp, 0, sizeof(ckp));
                 void* cargs[3] = { &region.handle->slot, &region.handle->diag, &region.maxIters };
