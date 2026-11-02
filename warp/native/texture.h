@@ -352,6 +352,7 @@ struct cuda_array_desc_t {
 // !defined(__CUDA_ARCH__), which would hide them from HIP's device compile -- exactly
 // where the software path that HIP takes needs them. On CUDA the two conditions are
 // the same, so nothing changes there.
+// The explicit-texel (texture_grad_*) PTX block and its three callers use it too.
 // One macro rather than repeating the condition at each site: every copy of a
 // three-clause condition is another chance to update all but one of them.
 #if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
@@ -1270,7 +1271,7 @@ template <typename T> inline T cpu_texture_grad_texel(const Texture* tex, int le
 
 #endif  // !WP_TEXTURE_USE_HW_SAMPLER
 
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_USE_HW_SAMPLER
 // Integer coordinates bypass texture filtering. CUDA arrays, including 1D
 // arrays, use the 2D array-fetch instruction; the 1D integer instruction is for
 // linear-memory textures. Always fetch four channels to avoid mixed-width
@@ -1360,7 +1361,7 @@ template <typename T> CUDA_CALLABLE_DEVICE inline T texture_grad_components(cons
 
 template <typename T> CUDA_CALLABLE inline T texture_grad_texel(const texture1d_t& tex, int level, texture_grad_index x)
 {
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_USE_HW_SAMPLER
     const int width = texture_mip_dim(tex.width, level);
     x = cuda_texture_grad_index(x, width, tex.get_address_mode_u(), tex.get_use_normalized_coords());
     if (x < 0 || x >= width)
@@ -1374,7 +1375,7 @@ template <typename T> CUDA_CALLABLE inline T texture_grad_texel(const texture1d_
 template <typename T>
 CUDA_CALLABLE inline T texture_grad_texel(const texture2d_t& tex, int level, texture_grad_index x, texture_grad_index y)
 {
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_USE_HW_SAMPLER
     const int width = texture_mip_dim(tex.width, level);
     const int height = texture_mip_dim(tex.height, level);
     x = cuda_texture_grad_index(x, width, tex.get_address_mode_u(), tex.get_use_normalized_coords());
@@ -1391,7 +1392,7 @@ template <typename T>
 CUDA_CALLABLE inline T
 texture_grad_texel(const texture3d_t& tex, int level, texture_grad_index x, texture_grad_index y, texture_grad_index z)
 {
-#if defined(__CUDA_ARCH__)
+#if WP_TEXTURE_USE_HW_SAMPLER
     const int width = texture_mip_dim(tex.width, level);
     const int height = texture_mip_dim(tex.height, level);
     const int depth = texture_mip_dim(tex.depth, level);
