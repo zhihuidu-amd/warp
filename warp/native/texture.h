@@ -339,7 +339,28 @@ struct cuda_array_desc_t {
 // CPU Software Texture Sampling Helpers
 // ============================================================================
 
-#if !defined(__CUDA_ARCH__)
+// Hardware texture sampling is CUDA-only. CUDA's templated
+// tex1D<T>/tex2D<T>/texNDLod<T> family has no counterpart in ROCm's much
+// smaller texture_fetch_functions.h, so HIP takes the #else branch in each of
+// the sites below -- a complete software sampler that produces correct results.
+// Physics workloads do not sample textures, so the performance difference does
+// not arise there; a real HIP texture path is deferred rather than faked.
+//
+//
+// The software sampler's own helpers (cpu_sample_*, cpu_texture_grad_texel) sit in
+// regions guarded by the NEGATION of this macro. Upstream guards them with
+// !defined(__CUDA_ARCH__), which would hide them from HIP's device compile -- exactly
+// where the software path that HIP takes needs them. On CUDA the two conditions are
+// the same, so nothing changes there.
+// One macro rather than repeating the condition at each site: every copy of a
+// three-clause condition is another chance to update all but one of them.
+#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
+#define WP_TEXTURE_USE_HW_SAMPLER 1
+#else
+#define WP_TEXTURE_USE_HW_SAMPLER 0
+#endif
+
+#if !WP_TEXTURE_USE_HW_SAMPLER
 
 // Reduce periodic coordinates before division or scaling can discard the
 // fractional position (or overflow). Unnormalized CPU textures also support
@@ -731,7 +752,7 @@ inline float cpu_sample_3d_channel(const Texture* tex, float u, float v, float w
     return v0 * (1.0f - fl) + v1 * fl;
 }
 
-#endif  // !defined(__CUDA_ARCH__)
+#endif  // !WP_TEXTURE_USE_HW_SAMPLER
 
 // ============================================================================
 // Texture Sampling Functions
@@ -769,21 +790,6 @@ template <typename T> __device__ T tex3DLod(unsigned long long texObj, float x, 
     T v {};
     return v;
 }
-#endif
-
-// Hardware texture sampling is CUDA-only. CUDA's templated
-// tex1D<T>/tex2D<T>/texNDLod<T> family has no counterpart in ROCm's much
-// smaller texture_fetch_functions.h, so HIP takes the #else branch in each of
-// the sites below -- a complete software sampler that produces correct results.
-// Physics workloads do not sample textures, so the performance difference does
-// not arise there; a real HIP texture path is deferred rather than faked.
-//
-// One macro rather than repeating the condition at each site: every copy of a
-// three-clause condition is another chance to update all but one of them.
-#if defined(__CUDA_ARCH__) && !defined(__HIP__) && !defined(__HIPCC_RTC__)
-#define WP_TEXTURE_USE_HW_SAMPLER 1
-#else
-#define WP_TEXTURE_USE_HW_SAMPLER 0
 #endif
 
 // CUDA < 13.1 can miscompile vector texture fetches in functions that mix
@@ -1245,7 +1251,7 @@ texture_grad_cell(float coord, int normalized, int base_dim, int level_dim, int 
     return (texture_grad_index)cell;
 }
 
-#if !defined(__CUDA_ARCH__)
+#if !WP_TEXTURE_USE_HW_SAMPLER
 // Read CPU corners directly so coordinate round trips cannot interpolate them.
 template <typename T> inline T cpu_texture_grad_texel(const Texture* tex, int level, int64 x, int64 y = 0, int64 z = 0)
 {
@@ -1262,7 +1268,7 @@ template <typename T> inline T cpu_texture_grad_texel(const Texture* tex, int le
     }
 }
 
-#endif  // !defined(__CUDA_ARCH__)
+#endif  // !WP_TEXTURE_USE_HW_SAMPLER
 
 #if defined(__CUDA_ARCH__)
 // Integer coordinates bypass texture filtering. CUDA arrays, including 1D
