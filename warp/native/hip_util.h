@@ -775,6 +775,11 @@ static inline hiprtcResult nvrtcGetSupportedArchs(int* archs)
 #ifndef CU_STREAM_DEFAULT
 #define CU_STREAM_DEFAULT hipStreamDefault
 #endif  // CU_STREAM_DEFAULT
+// CUDA's legacy default stream is the handle 1, and ROCm defines the same value as
+// hipStreamLegacy. Warp compares a stream against it to recognise the default stream.
+#ifndef CU_STREAM_LEGACY
+#define CU_STREAM_LEGACY hipStreamLegacy
+#endif  // CU_STREAM_LEGACY
 #ifndef CU_EVENT_DEFAULT
 #define CU_EVENT_DEFAULT hipEventDefault
 #endif  // CU_EVENT_DEFAULT

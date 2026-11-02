@@ -59,6 +59,21 @@ static inline nvPTXCompileResult nvPTXCompilerGetCompiledProgram(nvPTXCompilerHa
     return NVPTXCOMPILE_ERROR_INTERNAL;
 }
 
+static inline nvPTXCompileResult nvPTXCompilerGetErrorLogSize(nvPTXCompilerHandle compiler, size_t* size)
+{
+    (void)compiler;
+    if (size)
+        *size = 0;
+    return NVPTXCOMPILE_ERROR_INTERNAL;
+}
+
+static inline nvPTXCompileResult nvPTXCompilerGetErrorLog(nvPTXCompilerHandle compiler, char* log)
+{
+    (void)compiler;
+    (void)log;
+    return NVPTXCOMPILE_ERROR_INTERNAL;
+}
+
 static inline nvPTXCompileResult nvPTXCompilerDestroy(nvPTXCompilerHandle* compiler)
 {
     (void)compiler;
