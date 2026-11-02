@@ -12,6 +12,7 @@ from warp.sparse import (
     BSR_STATUS_ROW_CAPACITY_EXCEEDED,
     BSR_STATUS_SUCCESS,
     BsrMatrix,
+    BsrTripletMap,
     bsr_assign,
     bsr_axpy,
     bsr_axpy_work_arrays,
@@ -25,6 +26,7 @@ from warp.sparse import (
     bsr_mm_work_arrays,
     bsr_mv,
     bsr_scale,
+    bsr_set_from_mapped_values,
     bsr_set_from_triplets,
     bsr_set_transpose,
     bsr_set_zero,
@@ -197,6 +199,188 @@ def test_bsr_from_triplets(test, device):
         bsr_set_from_triplets(bsr, rows, cols, vals)
 
 
+def test_bsr_mapped_triplets(test, device):
+    rows = wp.array([0, 0, 0, 1, 1, 1], dtype=int, device=device)
+    columns = wp.array([0, 1, 1, 0, 0, 1], dtype=int, device=device)
+    initial = wp.array([0.0, 2.0, 3.0, 4.0, 5.0, 6.0], dtype=float, device=device)
+    updated = wp.array([2.0, 1.0, 4.0, 3.0, 6.0, 5.0], dtype=float, device=device)
+
+    matrix = bsr_zeros(2, 2, float, device=device)
+    mapping = bsr_set_from_triplets(matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping=True)
+    test.assertEqual(matrix.values.shape[0], rows.shape[0])
+    test.assertIsNotNone(mapping)
+    test.assertEqual(mapping.triplet_count, 6)
+    # Building the map does not synchronize; nnz remains the triplet count upper bound
+    test.assertEqual(matrix.nnz, 6)
+    assert_np_equal(mapping._triplet_blocks.numpy(), np.array([0, 1, 1, 2, 2, 3]))
+    assert_np_equal(mapping._triplet_indices.numpy(), np.array([0, 1, 2, 3, 4, 5]))
+    assert_np_equal(mapping._block_ends.numpy()[:4], np.array([1, 3, 5, 6]))
+
+    expected = np.array([[2.0, 5.0], [9.0, 5.0]])
+    for reduction in ("gather", "atomic"):
+        bsr_set_from_mapped_values(matrix, mapping, updated, reduction=reduction)
+        np.testing.assert_allclose(_bsr_to_dense(matrix), expected)
+
+    # Tighten the launch bound; the map stays valid
+    test.assertEqual(matrix.nnz_sync(), 4)
+    for reduction in ("gather", "atomic"):
+        bsr_set_from_mapped_values(matrix, mapping, updated, reduction=reduction)
+        np.testing.assert_allclose(_bsr_to_dense(matrix), expected)
+
+    # Atomic updates clear active blocks only, preserving unused allocation capacity.
+    matrix.values[matrix.nnz :].fill_(123.0)
+    bsr_set_from_mapped_values(matrix, mapping, updated, reduction="atomic")
+    np.testing.assert_allclose(_bsr_to_dense(matrix), expected)
+    assert_np_equal(matrix.values.numpy()[matrix.nnz :], np.full(matrix.values.shape[0] - matrix.nnz, 123.0))
+
+    # Discarded triplets are mapped to -1 and ignored by both reductions
+    dropped_rows = wp.array([0, -1, 1, 5], dtype=int, device=device)
+    dropped_columns = wp.array([0, 0, 1, 0], dtype=int, device=device)
+    dropped_matrix = bsr_zeros(2, 2, float, device=device)
+    dropped_mapping = bsr_set_from_triplets(
+        dropped_matrix, dropped_rows, dropped_columns, prune_numerical_zeros=False, build_mapping=True
+    )
+    assert_np_equal(dropped_mapping._triplet_blocks.numpy(), np.array([0, -1, 1, -1]))
+    dropped_values = wp.array([7.0, 11.0, 13.0, 17.0], dtype=float, device=device)
+    for reduction in ("gather", "atomic"):
+        bsr_set_from_mapped_values(dropped_matrix, dropped_mapping, dropped_values, reduction=reduction)
+        np.testing.assert_allclose(_bsr_to_dense(dropped_matrix), np.array([[7.0, 0.0], [0.0, 13.0]]))
+
+    empty = wp.empty(shape=(0,), dtype=int, device=device)
+    empty_matrix = bsr_zeros(2, 2, float, device=device)
+    empty_mapping = bsr_set_from_triplets(empty_matrix, empty, empty, prune_numerical_zeros=False, build_mapping=True)
+    test.assertEqual(empty_mapping.triplet_count, 0)
+    bsr_set_from_mapped_values(empty_matrix, empty_mapping, wp.empty(shape=(0,), dtype=float, device=device))
+    np.testing.assert_allclose(_bsr_to_dense(empty_matrix), np.zeros((2, 2)))
+
+    # Preallocated mapping, built in place and returned
+    preallocated = BsrTripletMap(capacity=8, device=device)
+    test.assertEqual((preallocated.triplet_count, preallocated.capacity), (0, 8))
+    with test.assertRaisesRegex(ValueError, "has not been built"):
+        bsr_set_from_mapped_values(matrix, preallocated, updated)
+    prealloc_matrix = bsr_zeros(2, 2, float, device=device)
+    built = bsr_set_from_triplets(
+        prealloc_matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping=preallocated
+    )
+    test.assertIs(built, preallocated)
+    test.assertEqual((preallocated.triplet_count, preallocated.capacity), (6, 8))
+    storage_ptrs = (
+        preallocated._triplet_blocks.ptr,
+        preallocated._block_ends.ptr,
+        preallocated._triplet_indices.ptr,
+    )
+    bsr_set_from_mapped_values(prealloc_matrix, preallocated, updated)
+    np.testing.assert_allclose(_bsr_to_dense(prealloc_matrix), expected)
+
+    # Rebuilding in place for other triplets reuses the storage
+    bsr_set_from_triplets(
+        prealloc_matrix, dropped_rows, dropped_columns, prune_numerical_zeros=False, build_mapping=preallocated
+    )
+    test.assertEqual((preallocated.triplet_count, preallocated.capacity), (4, 8))
+    test.assertEqual(
+        (preallocated._triplet_blocks.ptr, preallocated._block_ends.ptr, preallocated._triplet_indices.ptr),
+        storage_ptrs,
+    )
+    assert_np_equal(preallocated._triplet_blocks.numpy(), np.array([0, -1, 1, -1]))
+    bsr_set_from_mapped_values(prealloc_matrix, preallocated, dropped_values)
+    np.testing.assert_allclose(_bsr_to_dense(prealloc_matrix), np.array([[7.0, 0.0], [0.0, 13.0]]))
+
+    # Insufficient capacity grows the storage
+    small = BsrTripletMap(capacity=2, device=device)
+    bsr_set_from_triplets(prealloc_matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping=small)
+    test.assertEqual((small.triplet_count, small.capacity), (6, 6))
+    bsr_set_from_mapped_values(prealloc_matrix, small, updated)
+    np.testing.assert_allclose(_bsr_to_dense(prealloc_matrix), expected)
+
+    with test.assertRaises(TypeError):
+        bsr_set_from_triplets(matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping="yes")
+    if not device.is_cpu:
+        with test.assertRaisesRegex(ValueError, "same device"):
+            bsr_set_from_triplets(
+                matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping=BsrTripletMap(device="cpu")
+            )
+
+    if device.is_cuda:
+        # Building the map is capturable
+        captured_matrix = bsr_zeros(2, 2, float, device=device, nnz_capacity=rows.shape[0])
+        with wp.ScopedCapture(device=device, force_module_load=False) as capture:
+            captured_mapping = bsr_set_from_triplets(
+                captured_matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping=True
+            )
+            bsr_set_from_mapped_values(captured_matrix, captured_mapping, updated, reduction="gather")
+        wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(_bsr_to_dense(captured_matrix), expected)
+        assert_np_equal(captured_mapping._triplet_blocks.numpy(), mapping._triplet_blocks.numpy())
+        # Release graph-owned map storage before destroying the graph. The matrix
+        # capacity was allocated outside capture and remains valid independently.
+        del captured_mapping
+        del capture
+
+        # With storage preallocated outside of the capture, the map is not owned by the graph
+        captured_matrix = bsr_zeros(2, 2, float, device=device, nnz_capacity=rows.shape[0])
+        persistent = BsrTripletMap(capacity=rows.shape[0], device=device)
+        bsr_set_from_triplets(
+            captured_matrix, dropped_rows, dropped_columns, prune_numerical_zeros=False, build_mapping=persistent
+        )
+        persistent_ptrs = (
+            persistent._triplet_blocks.ptr,
+            persistent._block_ends.ptr,
+            persistent._triplet_indices.ptr,
+        )
+        with wp.ScopedCapture(device=device, force_module_load=False) as capture:
+            bsr_set_from_triplets(
+                captured_matrix, rows, columns, initial, prune_numerical_zeros=False, build_mapping=persistent
+            )
+        wp.capture_launch(capture.graph)
+        del capture
+        test.assertEqual(
+            (persistent._triplet_blocks.ptr, persistent._block_ends.ptr, persistent._triplet_indices.ptr),
+            persistent_ptrs,
+        )
+        bsr_set_from_mapped_values(captured_matrix, persistent, updated)
+        np.testing.assert_allclose(_bsr_to_dense(captured_matrix), expected)
+
+    block_type = wp.types.matrix(shape=(2, 2), dtype=float)
+    block_values = wp.array(
+        np.arange(24, dtype=np.float32).reshape(6, 2, 2),
+        dtype=float,
+        device=device,
+    )
+    block_matrix = bsr_zeros(2, 2, block_type, device=device)
+    block_mapping = bsr_set_from_triplets(
+        block_matrix, rows, columns, block_values, prune_numerical_zeros=False, build_mapping=True
+    )
+    expected_blocks = _triplets_to_dense((4, 4), rows, columns, block_values)
+    for reduction in ("gather", "atomic"):
+        bsr_set_from_mapped_values(block_matrix, block_mapping, block_values, reduction=reduction)
+        np.testing.assert_allclose(_bsr_to_dense(block_matrix), expected_blocks)
+
+    strided_values = wp.array(np.arange(12, dtype=np.float32), dtype=float, device=device)[::2]
+    with test.assertRaisesRegex(ValueError, "must be contiguous"):
+        bsr_set_from_mapped_values(matrix, mapping, strided_values)
+    with test.assertRaisesRegex(ValueError, "must be contiguous"):
+        bsr_set_from_triplets(
+            matrix,
+            rows,
+            columns,
+            strided_values,
+            prune_numerical_zeros=False,
+        )
+
+    topology_only = bsr_zeros(2, 2, float, device=device)
+    topology_mapping = bsr_set_from_triplets(
+        topology_only, rows, columns, prune_numerical_zeros=False, build_mapping=True
+    )
+    bsr_set_from_mapped_values(topology_only, topology_mapping, updated)
+    np.testing.assert_allclose(_bsr_to_dense(topology_only), expected)
+
+    with test.assertRaisesRegex(ValueError, "requires topology"):
+        bsr_set_from_triplets(matrix, rows, columns, initial, topology="masked", build_mapping=True)
+
+    with test.assertRaisesRegex(ValueError, "requires prune_numerical_zeros=False"):
+        bsr_set_from_triplets(matrix, rows, columns, initial, build_mapping=True)
+
+
 def test_bsr_from_triplets_prune_numerical_zeros(test, device):
     rows = wp.array([1, 0, 2, 3], dtype=int)
     cols = wp.array([0, 1, 2, 3], dtype=int)
@@ -221,6 +405,68 @@ def test_bsr_from_triplets_prune_numerical_zeros(test, device):
         prune_numerical_zeros=True,
     )
     assert A.nnz_sync() == 0
+
+
+def test_bsr_from_triplets_packed_key_boundaries(test, device):
+    """Keep maximum valid coordinates ahead of every pruned triplet key."""
+    for nrow, ncol in ((1, 1), (4, 4), (3, 5)):
+        max_row = nrow - 1
+        max_col = ncol - 1
+        rows = wp.array(
+            [max_row, -1, max_row, nrow, max_row, 0, max_row, max_row, -7, max_row, max_row],
+            dtype=int,
+            device=device,
+        )
+        columns = wp.array(
+            [max_col, max_col, -1, max_col, ncol, 0, max_col, max_col, max_col, -3, max_col],
+            dtype=int,
+            device=device,
+        )
+        values = wp.array([1.0, 7.0, 8.0, 9.0, 10.0, 11.0, 2.0, 0.0, 13.0, 14.0, 32.0], dtype=float, device=device)
+        count = wp.array([10], dtype=int, device=device)
+
+        # The final duplicate is outside ``count``. Negative, out-of-range,
+        # and numerical-zero triplets must not split the max-coordinate run.
+        expected = np.zeros((nrow, ncol))
+        expected[0, 0] += 11.0
+        expected[max_row, max_col] += 3.0
+        expected_nnz = 1 if (nrow, ncol) == (1, 1) else 2
+        compact = bsr_zeros(nrow, ncol, float, device=device)
+        bsr_set_from_triplets(compact, rows, columns, values, count=count, prune_numerical_zeros=True)
+        test.assertEqual(compact.nnz_sync(), expected_nnz)
+        np.testing.assert_allclose(_bsr_to_dense(compact), expected)
+
+        padded = bsr_zeros(nrow, ncol, float, device=device, row_capacity=2)
+        bsr_set_from_triplets(padded, rows, columns, values, count=count, prune_numerical_zeros=True, topology="padded")
+        test.assertEqual(padded.status_sync(), BSR_STATUS_SUCCESS)
+        np.testing.assert_allclose(_bsr_to_dense(padded), expected)
+
+        # A topology mask admits only the maximum coordinate; the otherwise
+        # valid (0, 0) triplet is rejected before its key is encoded.
+        masked = bsr_zeros(nrow, ncol, float, device=device)
+        bsr_set_from_triplets(
+            masked,
+            wp.array([max_row], dtype=int, device=device),
+            wp.array([max_col], dtype=int, device=device),
+            values=None,
+        )
+        bsr_set_from_triplets(masked, rows, columns, values, count=count, prune_numerical_zeros=True, topology="masked")
+        test.assertEqual(masked.nnz_sync(), 1)
+        np.testing.assert_array_equal(masked.columns.numpy()[:1], np.array([max_col]))
+        np.testing.assert_allclose(masked.values.numpy()[:1], np.array([14.0 if (nrow, ncol) == (1, 1) else 3.0]))
+
+    # Empty dimensions retain no keys even with non-empty, otherwise positive
+    # triplet input.
+    for nrow, ncol in ((0, 3), (3, 0), (0, 0)):
+        matrix = bsr_zeros(nrow, ncol, float, device=device)
+        bsr_set_from_triplets(
+            matrix,
+            wp.array([0], dtype=int, device=device),
+            wp.array([0], dtype=int, device=device),
+            wp.array([1.0], dtype=float, device=device),
+        )
+        test.assertEqual(matrix.nnz_sync(), 0)
+        np.testing.assert_array_equal(matrix.offsets.numpy(), np.zeros(nrow + 1, dtype=np.int32))
 
 
 def test_bsr_stale_compact_tail(test, device):
@@ -591,6 +837,26 @@ def test_bsr_compress_gradient(test, device):
     assert_np_equal(padded_vals.grad.numpy(), np.array([1.0, 0.0, 1.0, 0.0]))
 
 
+def test_bsr_compress_structure_only(test, device):
+    values_np = np.arange(36, dtype=np.float32).reshape(4, 3, 3)
+    matrix = bsr_zeros(1, 3, wp.mat33, device=device)
+    matrix.nnz = 4
+    matrix.offsets = wp.array([0, 4], dtype=int, device=device)
+    matrix.row_counts = wp.array([4], dtype=int, device=device)
+    matrix.columns = wp.array([1, 0, 1, 2], dtype=int, device=device)
+    matrix.values = wp.array(values_np, dtype=wp.mat33, device=device)
+    values_ptr = matrix.values.ptr
+
+    bsr_compress(matrix, structure_only=True)
+
+    test.assertEqual(matrix.nnz_sync(), 3)
+    test.assertIsNone(matrix.row_counts)
+    test.assertEqual(matrix.values.ptr, values_ptr)
+    np.testing.assert_array_equal(matrix.offsets.numpy(), np.array([0, 3]))
+    np.testing.assert_array_equal(matrix.columns.numpy()[:3], np.array([0, 1, 2]))
+    np.testing.assert_array_equal(matrix.values.numpy(), values_np)
+
+
 def test_bsr_get_set_diag(test, device):
     rng = np.random.default_rng(123)
 
@@ -739,8 +1005,9 @@ def make_test_bsr_transpose(block_shape, scalar_type):
     def test_bsr_transpose(test, device):
         rng = np.random.default_rng(123)
 
-        nrow = 4
-        ncol = 5
+        # Keep the matrix rectangular, with both dimensions crossing a power-of-two boundary.
+        nrow = 65
+        ncol = 67
         nnz = 6
 
         rows = wp.array([0, 1, 2, 3, 2, 1], dtype=int, device=device)
@@ -753,10 +1020,16 @@ def make_test_bsr_transpose(block_shape, scalar_type):
         bsr_set_from_triplets(bsr, rows, cols, vals)
         ref = 2.0 * np.transpose(_bsr_to_dense(bsr))
 
-        bsr_transposed = (2.0 * bsr).transpose().eval()
+        bsr.values.requires_grad = True
+        with wp.Tape() as tape:
+            bsr_transposed = (2.0 * bsr).transpose().eval()
 
         res = _bsr_to_dense(bsr_transposed)
         assert_np_equal(res, ref, 0.0001)
+
+        seed = wp.array(np.ones_like(bsr_transposed.values.numpy()), dtype=bsr_transposed.values.dtype, device=device)
+        tape.backward(grads={bsr_transposed.values: seed})
+        assert_np_equal(bsr.values.grad.numpy(), np.full_like(bsr.values.numpy(), 2.0))
 
         if block_shape[0] != block_shape[-1]:
             # test incompatible block shape
@@ -779,7 +1052,121 @@ def make_test_bsr_transpose(block_shape, scalar_type):
         bsr_set_transpose(bsr_transposed, bsr, topology="masked")
         assert _bsr_pruned(bsr_transposed).nnz_sync() == 2
 
+        if block_shape == (1, 1):
+            diagonal = np.arange(1, nrow + 1, dtype=np.float32)
+            aliased = bsr_diag(wp.array(diagonal, dtype=scalar_type, device=device))
+            bsr_set_transpose(aliased, 2.0 * aliased)
+            test.assertEqual(aliased.nnz_sync(), nrow)
+            assert_np_equal(aliased.values.numpy(), 2.0 * diagonal)
+
     return test_bsr_transpose
+
+
+def make_test_bsr_transpose_rebuild(block_shape, scalar_type):
+    def test_bsr_transpose_rebuild(test, device):
+        rng = np.random.default_rng(17)  # Fixed seed makes topology changes reproducible.
+        # Exercise a long output row and rectangular index ranges just above powers of two.
+        nrow, ncol = 1025, 257
+        block_type = wp.types.matrix(shape=block_shape, dtype=scalar_type)
+        transpose_type = wp.types.matrix(shape=block_shape[::-1], dtype=scalar_type)
+        numpy_type = wp.dtype_to_numpy(scalar_type)
+        capacity = nrow * 16
+
+        for padded in (False, True):
+            with test.subTest(padded=padded), wp.ScopedDevice(device):
+                src = bsr_zeros(nrow, ncol, block_type, row_capacity=16 if padded else None)
+                src.notify_nnz_changed(nnz=capacity)
+                dest = bsr_zeros(ncol, nrow, transpose_type)
+                bsr_set_transpose(dest, src)
+                graph = None
+                if wp.get_device(device).is_cuda:
+                    with wp.ScopedCapture(force_module_load=False) as capture:
+                        bsr_set_transpose(dest, src)
+                    graph = capture.graph
+
+                # Vary concentrated row lengths around powers of two during graph replay.
+                boundary_counts = (31, 32, 33, 255, 256, 257, 511, 512, 513, 1023, 1024, nrow)
+                # The non-boundary counts are arbitrary occupancies: grow, empty, then
+                # shrink the captured topology to detect stale entries and padding reads.
+                for count in (1, 600, 0, *boundary_counts, 120):
+                    positions = (
+                        np.arange(count) * ncol
+                        if count in boundary_counts
+                        else np.sort(rng.choice(nrow * ncol, count, replace=False))
+                    )
+                    rows, columns = np.divmod(positions, ncol)
+                    counts = np.bincount(rows, minlength=nrow).astype(np.int32)
+                    offsets = np.concatenate(([0], np.cumsum(counts))).astype(np.int32)
+                    column_storage = np.full(capacity, -1, dtype=np.int32)
+                    values = rng.standard_normal((count, *block_shape)).astype(numpy_type)
+                    if count:
+                        values[0] = -0.0
+                    value_storage = np.full((capacity, *block_shape), np.nan, dtype=numpy_type)
+                    for row in range(nrow):
+                        begin, end = offsets[row : row + 2]
+                        start = row * 16 if padded else begin
+                        column_storage[start : start + end - begin] = columns[begin:end]
+                        value_storage[start : start + end - begin] = values[begin:end]
+                    if padded:
+                        wp.copy(src.row_counts, wp.array(counts, dtype=int))
+                    else:
+                        wp.copy(src.offsets, wp.array(offsets, dtype=int))
+                    wp.copy(src.columns, wp.array(column_storage, dtype=int))
+                    wp.copy(src.values, wp.array(value_storage, dtype=block_type))
+                    if graph is None:
+                        bsr_set_transpose(dest, src)
+                    else:
+                        wp.capture_launch(graph)
+
+                    order = np.lexsort((rows, columns))
+                    expected_offsets = np.concatenate(([0], np.cumsum(np.bincount(columns, minlength=ncol))))
+                    assert_np_equal(dest.offsets.numpy(), expected_offsets.astype(np.int32))
+                    assert_np_equal(dest.columns.numpy()[:count], rows[order].astype(np.int32))
+                    expected_values = values[order].transpose(0, 2, 1).copy()
+                    test.assertEqual(dest.values.numpy()[:count].tobytes(), expected_values.tobytes())
+                    test.assertEqual(dest.nnz_sync(), count)
+
+    return test_bsr_transpose_rebuild
+
+
+def test_bsr_transpose_padded_column_bounds(test, device):
+    # Padding between active rows must sort after the largest valid column,
+    # including when the destination row count is a power of two.
+    with wp.ScopedDevice(device):
+        for ncol in (1, 2, 3, 31, 32, 33, 63, 64, 65, 255, 256, 257):
+            with test.subTest(ncol=ncol):
+                nrow, row_capacity = 5, 3
+                src = bsr_zeros(nrow, ncol, float, row_capacity=row_capacity)
+                src.notify_nnz_changed(nnz=nrow * row_capacity)
+                src.row_counts.fill_(1)
+                columns = np.full(nrow * row_capacity, -1, dtype=np.int32)
+                columns[::row_capacity] = ncol - 1
+                values = np.full(nrow * row_capacity, np.nan, dtype=np.float32)
+                values[::row_capacity] = [-0.0, 1.0, -2.0, 3.0, -4.0]
+                wp.copy(src.columns, wp.array(columns, dtype=int))
+                wp.copy(src.values, wp.array(values, dtype=float))
+                dest = bsr_zeros(ncol, nrow, float)
+                bsr_set_transpose(dest, src)
+                graph = None
+                if wp.get_device(device).is_cuda:
+                    with wp.ScopedCapture(force_module_load=False) as capture:
+                        bsr_set_transpose(dest, src)
+                    graph = capture.graph
+                for alternating in (False, True):
+                    if alternating:
+                        columns[:: 2 * row_capacity] = 0
+                    wp.copy(src.columns, wp.array(columns, dtype=int))
+                    if graph is None:
+                        bsr_set_transpose(dest, src)
+                    else:
+                        wp.capture_launch(graph)
+                    active_columns = columns[::row_capacity]
+                    order = np.argsort(active_columns, kind="stable")
+                    offsets = np.concatenate(([0], np.cumsum(np.bincount(active_columns, minlength=ncol))))
+                    assert_np_equal(dest.offsets.numpy(), offsets.astype(np.int32))
+                    assert_np_equal(dest.columns.numpy()[:nrow], order.astype(np.int32))
+                    test.assertEqual(dest.values.numpy()[:nrow].tobytes(), values[::row_capacity][order].tobytes())
+                    test.assertEqual(dest.nnz_sync(), nrow)
 
 
 def make_test_bsr_axpy(block_shape, scalar_type):
@@ -1070,6 +1457,90 @@ def make_test_bsr_multiply_deep(block_shape, scalar_type):
     return test_bsr_multiply_deep
 
 
+def _make_dense_bsr(nrow, ncol, block_shape, rng, device):
+    rows, cols = np.meshgrid(np.arange(nrow), np.arange(ncol), indexing="ij")
+    values = rng.random(size=(nrow * ncol, block_shape[0], block_shape[1]))
+    return bsr_from_triplets(
+        nrow,
+        ncol,
+        wp.array(rows.flatten(), dtype=int, device=device),
+        wp.array(cols.flatten(), dtype=int, device=device),
+        wp.array(values, dtype=wp.float64, device=device),
+    )
+
+
+def make_test_bsr_mv_tile_size(block_shape):
+    def test_bsr_mv_tile_size(test, device):
+        """Test that bsr_mv honors positive tile sizes on a device that runs full tiles.
+
+        Every row holds 80 blocks, so all lanes of a 64-wide tile have work.
+        """
+        rng = np.random.default_rng(123)
+
+        A = _make_dense_bsr(6, 80, block_shape, rng, device)
+        A_dense = _bsr_to_dense(A)
+
+        x_np = rng.random(size=80 * block_shape[1])
+        y0_np = rng.random(size=6 * block_shape[0])
+        x = wp.array(x_np, dtype=wp.float64, device=device)
+
+        y = wp.array(y0_np, dtype=wp.float64, device=device)
+        bsr_mv(A, x, y, alpha=2.0, beta=0.5, tile_size=32)
+        assert_np_equal(y.numpy(), 2.0 * A_dense @ x_np + 0.5 * y0_np, tol=1.0e-10)
+
+        y = wp.array(y0_np, dtype=wp.float64, device=device)
+        bsr_mv(A, x, y, alpha=2.0, beta=0.0, tile_size=64)
+        assert_np_equal(y.numpy(), 2.0 * A_dense @ x_np, tol=1.0e-10)
+
+        y = bsr_mv(A, x, tile_size=64)
+        assert_np_equal(y.numpy(), A_dense @ x_np, tol=1.0e-10)
+
+        y = wp.array(y0_np, dtype=wp.float64, device=device)
+        bsr_mv(A, x, y, alpha=2.0, beta=0.5, tile_size=1)
+        assert_np_equal(y.numpy(), 2.0 * A_dense @ x_np + 0.5 * y0_np, tol=1.0e-10)
+
+    return test_bsr_mv_tile_size
+
+
+def make_test_bsr_mm_tile_size(block_shape):
+    def test_bsr_mm_tile_size(test, device):
+        """Test that bsr_mm honors positive tile sizes on a device that runs full tiles, for every result topology.
+
+        Every row of ``x`` holds 80 blocks, so all lanes of a 64-wide tile have work.
+        """
+        rng = np.random.default_rng(123)
+
+        x = _make_dense_bsr(4, 80, block_shape, rng, device)
+        y = _make_dense_bsr(80, 3, block_shape[::-1], rng, device)
+        xy_dense = _bsr_to_dense(x) @ _bsr_to_dense(y)
+        z_block_type = wp.types.matrix(shape=(block_shape[0], block_shape[0]), dtype=wp.float64)
+
+        z = bsr_from_triplets(
+            4,
+            3,
+            wp.array([0, 1, 3], dtype=int, device=device),
+            wp.array([2, 0, 1], dtype=int, device=device),
+            wp.array(rng.random(size=(3, block_shape[0], block_shape[0])), dtype=wp.float64, device=device),
+        )
+        z0_dense = _bsr_to_dense(z)
+        bsr_mm(x, y, z, alpha=2.0, beta=0.5, tile_size=32)
+        assert_np_equal(_bsr_to_dense(z), 2.0 * xy_dense + 0.5 * z0_dense, tol=1.0e-10)
+
+        z = bsr_mm(x, y, tile_size=64)
+        assert_np_equal(_bsr_to_dense(z), xy_dense, tol=1.0e-10)
+
+        z = bsr_diag(rows_of_blocks=4, cols_of_blocks=3, block_type=z_block_type, device=device)
+        bsr_mm(x, y, z, topology="masked", tile_size=64)
+        diag_mask = np.kron(np.eye(4, 3), np.ones((block_shape[0], block_shape[0])))
+        assert_np_equal(_bsr_to_dense(z), diag_mask * xy_dense, tol=1.0e-10)
+
+        z = bsr_zeros(4, 3, z_block_type, device=device, row_capacity=3)
+        bsr_mm(x, y, z, topology="padded", tile_size=64)
+        assert_np_equal(_bsr_to_dense(z), xy_dense, tol=1.0e-10)
+
+    return test_bsr_mm_tile_size
+
+
 def test_bsr_mm_max_new_nnz(test, device):
     """Test BSR matrix multiplication with ``max_new_nnz``."""
     A = bsr_from_triplets(
@@ -1209,6 +1680,72 @@ def test_bsr_compress_trailing_capacity_capturability(test, device):
 
             wp.capture_launch(capture.graph)
             _assert_bsr_ignores_trailing_capacity(test, matrix)
+
+
+def test_bsr_compress_out_of_range_columns(test, device):
+    """Test that BSR compression drops negative and out-of-range columns."""
+
+    rng = np.random.default_rng(2162)
+    int32_max = np.iinfo(np.int32).max
+    invalid_columns = np.array([-1, -5, 0, 1, int32_max], dtype=np.int32)
+
+    # (row lengths, block shape): short rows exercise the CUDA serial kernel, longer rows and
+    # larger blocks the shared-memory kernel, and one very long distinct-column row its global fallback.
+    cases = (
+        ([3, 4, 2, 5], (1, 1)),
+        ([40, 25, 33], (1, 1)),
+        ([6, 7, 5, 8], (3, 3)),
+        ([600] + [1] * 63, (2, 2)),
+    )
+
+    for row_lengths, block_shape in cases:
+        nrow = len(row_lengths)
+        ncol = 700 if row_lengths[0] == 600 else 9
+        invalid_columns[2:4] = (ncol, ncol + 3)
+
+        offsets = np.concatenate(([0], np.cumsum(row_lengths))).astype(np.int32)
+        nnz = int(offsets[-1])
+        if row_lengths[0] == 600:
+            columns = np.concatenate([rng.permutation(ncol)[:600]] + [rng.integers(0, ncol, 1) for _ in range(63)])
+        else:
+            columns = rng.integers(0, ncol, nnz)
+        columns = columns.astype(np.int32)
+        invalid = rng.random(nnz) < 0.3
+        columns[invalid] = rng.choice(invalid_columns, int(invalid.sum()))
+        columns[0] = ncol
+        columns[-1] = int32_max
+
+        values = rng.uniform(1.0, 2.0, size=(nnz, *block_shape))
+
+        expected = np.zeros((nrow, ncol, *block_shape))
+        for row in range(nrow):
+            for block in range(offsets[row], offsets[row + 1]):
+                col = columns[block]
+                if 0 <= col < ncol:
+                    expected[row, col] += values[block]
+        expected = expected.transpose(0, 2, 1, 3).reshape(nrow * block_shape[0], ncol * block_shape[1])
+
+        for scalar_type in (wp.float32, wp.float64):
+            block_type = scalar_type if block_shape == (1, 1) else wp.types.matrix(shape=block_shape, dtype=scalar_type)
+            for inplace in (False, True):
+                with test.subTest(
+                    row_lengths=row_lengths[:4], block_shape=block_shape, dtype=scalar_type, inplace=inplace
+                ):
+                    A = bsr_zeros(nrow, ncol, block_type, device=device)
+                    A.nnz = nnz
+                    A.offsets = wp.array(offsets, dtype=int, device=device)
+                    A.columns = wp.array(columns, dtype=int, device=device)
+                    A.values = wp.array(
+                        values.squeeze() if block_shape == (1, 1) else values, dtype=block_type, device=device
+                    )
+
+                    bsr_compress(A, prune_numerical_zeros=False, inplace=inplace)
+
+                    active_columns = A.columns.numpy()[: A.nnz_sync()]
+                    test.assertTrue(np.all((active_columns >= 0) & (active_columns < ncol)))
+                    np.testing.assert_allclose(
+                        _bsr_to_dense(A), expected, rtol=1.0e-5 if scalar_type == wp.float32 else 1.0e-12
+                    )
 
 
 def test_bsr_compress_compact_capturability(test, device):
@@ -1494,6 +2031,19 @@ def test_bsr_alloc(test, device):
     assert bsr.values.shape[0] >= 6
 
 
+def test_bsr_set_zero_row_capacity_after_shrink(test, device):
+    bsr = bsr_zeros(5, 4, block_type=float, device=device)
+
+    # Shrinking keeps the larger offsets allocation
+    bsr_set_zero(bsr, rows_of_blocks=3)
+    row_capacity = wp.array([2, 0, 1], dtype=int, device=device)
+    bsr_set_zero(bsr, topology="padded", row_capacity=row_capacity)
+
+    test.assertEqual(bsr.nnz_sync(), 3)
+    np.testing.assert_array_equal(bsr.offsets.numpy()[: bsr.nrow + 1], np.array([0, 2, 2, 3], dtype=np.int32))
+    np.testing.assert_array_equal(bsr.row_counts.numpy()[: bsr.nrow], np.zeros(3, dtype=np.int32))
+
+
 def test_bsr_scaled_expression_add_sub(test, device):
     # Scaled expressions must give the same result on either side of + and -
     rng = np.random.default_rng(123)
@@ -1557,13 +2107,80 @@ class TestSparse(unittest.TestCase):
         diag_pruned = _bsr_pruned(diag_copy)
         self.assertEqual(diag_pruned.nnz_sync(), 0)
 
+    @unittest.skipUnless(wp.is_cpu_available(), "Requires CPU support")
+    def test_bsr_mv_tile_size_cpu_blocks(self):
+        with mock.patch.object(wp.config, "enable_cpu_blocks", True):
+            make_test_bsr_mv_tile_size((3, 2))(self, "cpu")
+
+    @unittest.skipUnless(wp.is_cpu_available(), "Requires CPU support")
+    def test_bsr_mm_tile_size_cpu_blocks(self):
+        with mock.patch.object(wp.config, "enable_cpu_blocks", True):
+            make_test_bsr_mm_tile_size((3, 2))(self, "cpu")
+
+    @unittest.skipUnless(wp.is_cpu_available(), "Requires CPU support")
+    def test_bsr_mv_tile_size_without_cpu_blocks(self):
+        rng = np.random.default_rng(123)
+
+        A = _make_dense_bsr(6, 80, (3, 2), rng, "cpu")
+        A_dense = _bsr_to_dense(A)
+
+        x_np = rng.random(size=80 * 2)
+        y0_np = rng.random(size=6 * 3)
+        x = wp.array(x_np, dtype=wp.float64, device="cpu")
+        y = wp.array(y0_np, dtype=wp.float64, device="cpu")
+
+        with mock.patch.object(wp.config, "enable_cpu_blocks", False):
+            with self.assertRaisesRegex(ValueError, r"tile_size=32 .* wp\.config\.enable_cpu_blocks is True"):
+                bsr_mv(A, x, y, alpha=2.0, beta=0.5, tile_size=32)
+            assert_np_equal(y.numpy(), y0_np)
+
+            bsr_mv(A, x, y, alpha=2.0, beta=0.5, tile_size=1)
+            assert_np_equal(y.numpy(), 2.0 * A_dense @ x_np + 0.5 * y0_np, tol=1.0e-10)
+
+            y = wp.array(y0_np, dtype=wp.float64, device="cpu")
+            x = bsr_mv(A, y, transpose=True, tile_size=32)
+            assert_np_equal(x.numpy(), A_dense.T @ y0_np, tol=1.0e-10)
+
+    @unittest.skipUnless(wp.is_cpu_available(), "Requires CPU support")
+    def test_bsr_mm_tile_size_without_cpu_blocks(self):
+        rng = np.random.default_rng(123)
+
+        x = _make_dense_bsr(4, 80, (3, 2), rng, "cpu")
+        y = _make_dense_bsr(80, 3, (2, 3), rng, "cpu")
+        xy_dense = _bsr_to_dense(x) @ _bsr_to_dense(y)
+
+        z = bsr_from_triplets(
+            4,
+            3,
+            wp.array([0, 1, 3], dtype=int, device="cpu"),
+            wp.array([2, 0, 1], dtype=int, device="cpu"),
+            wp.array(rng.random(size=(3, 3, 3)), dtype=wp.float64, device="cpu"),
+        )
+        z0_dense = _bsr_to_dense(z)
+
+        with mock.patch.object(wp.config, "enable_cpu_blocks", False):
+            with self.assertRaisesRegex(ValueError, r"tile_size=32 .* wp\.config\.enable_cpu_blocks is True"):
+                bsr_mm(x, y, z, alpha=2.0, beta=0.5, tile_size=32)
+            self.assertEqual(z.nnz, 3)
+            assert_np_equal(_bsr_to_dense(z), z0_dense)
+
+            bsr_mm(x, y, z, alpha=2.0, beta=0.5, tile_size=1)
+            assert_np_equal(_bsr_to_dense(z), 2.0 * xy_dense + 0.5 * z0_dense, tol=1.0e-10)
+
 
 add_function_test(TestSparse, "test_csr_from_triplets", test_csr_from_triplets, devices=devices)
 add_function_test(TestSparse, "test_bsr_from_triplets", test_bsr_from_triplets, devices=devices)
+add_function_test(TestSparse, "test_bsr_mapped_triplets", test_bsr_mapped_triplets, devices=devices)
 add_function_test(
     TestSparse,
     "test_bsr_from_triplets_prune_numerical_zeros",
     test_bsr_from_triplets_prune_numerical_zeros,
+    devices=devices,
+)
+add_function_test(
+    TestSparse,
+    "test_bsr_from_triplets_packed_key_boundaries",
+    test_bsr_from_triplets_packed_key_boundaries,
     devices=devices,
 )
 add_function_test(TestSparse, "test_bsr_stale_compact_tail", test_bsr_stale_compact_tail, devices=devices)
@@ -1574,10 +2191,23 @@ add_function_test(TestSparse, "test_bsr_split_merge", test_bsr_split_merge, devi
 add_function_test(TestSparse, "test_bsr_assign_masked", test_bsr_assign_masked, devices=devices)
 add_function_test(TestSparse, "test_bsr_from_triplets_gradient", test_bsr_from_triplets_gradient, devices=devices)
 add_function_test(TestSparse, "test_bsr_compress_gradient", test_bsr_compress_gradient, devices=devices)
+add_function_test(TestSparse, "test_bsr_compress_structure_only", test_bsr_compress_structure_only, devices=devices)
 
 add_function_test(TestSparse, "test_csr_transpose", make_test_bsr_transpose((1, 1), wp.float32), devices=devices)
+add_function_test(
+    TestSparse, "test_bsr_transpose_padded_column_bounds", test_bsr_transpose_padded_column_bounds, devices=devices
+)
 add_function_test(TestSparse, "test_bsr_transpose_1_3", make_test_bsr_transpose((1, 3), wp.float32), devices=devices)
 add_function_test(TestSparse, "test_bsr_transpose_3_3", make_test_bsr_transpose((3, 3), wp.float64), devices=devices)
+add_function_test(
+    TestSparse, "test_bsr_transpose_rebuild_1_1", make_test_bsr_transpose_rebuild((1, 1), wp.float32), devices=devices
+)
+add_function_test(
+    TestSparse, "test_bsr_transpose_rebuild_2_3", make_test_bsr_transpose_rebuild((2, 3), wp.float32), devices=devices
+)
+add_function_test(
+    TestSparse, "test_bsr_transpose_rebuild_3_3", make_test_bsr_transpose_rebuild((3, 3), wp.float64), devices=devices
+)
 
 add_function_test(TestSparse, "test_csr_axpy", make_test_bsr_axpy((1, 1), wp.float32), devices=devices)
 add_function_test(TestSparse, "test_bsr_axpy_1_3", make_test_bsr_axpy((1, 3), wp.float32), devices=devices)
@@ -1601,6 +2231,15 @@ add_function_test(TestSparse, "test_csr_mv", make_test_bsr_mv((1, 1), wp.float32
 add_function_test(TestSparse, "test_bsr_mv_1_3", make_test_bsr_mv((1, 3), wp.float32), devices=devices)
 add_function_test(TestSparse, "test_bsr_mv_3_3", make_test_bsr_mv((3, 3), wp.float64), devices=devices)
 
+add_function_test(TestSparse, "test_csr_mv_tile_size", make_test_bsr_mv_tile_size((1, 1)), devices=cuda_test_devices)
+add_function_test(
+    TestSparse, "test_bsr_mv_tile_size_3_2", make_test_bsr_mv_tile_size((3, 2)), devices=cuda_test_devices
+)
+add_function_test(TestSparse, "test_csr_mm_tile_size", make_test_bsr_mm_tile_size((1, 1)), devices=cuda_test_devices)
+add_function_test(
+    TestSparse, "test_bsr_mm_tile_size_3_2", make_test_bsr_mm_tile_size((3, 2)), devices=cuda_test_devices
+)
+
 add_function_test(TestSparse, "test_capturability", test_capturability, devices=cuda_test_devices_with_mempool)
 add_function_test(
     TestSparse,
@@ -1613,6 +2252,12 @@ add_function_test(
     "test_bsr_compress_trailing_capacity_capturability",
     test_bsr_compress_trailing_capacity_capturability,
     devices=cuda_test_devices_with_mempool,
+)
+add_function_test(
+    TestSparse,
+    "test_bsr_compress_out_of_range_columns",
+    test_bsr_compress_out_of_range_columns,
+    devices=devices,
 )
 add_function_test(
     TestSparse,
@@ -1653,6 +2298,12 @@ add_function_test(
 add_function_test(TestSparse, "test_bsr_mm_max_new_nnz", test_bsr_mm_max_new_nnz, devices=devices, check_output=False)
 
 add_function_test(TestSparse, "test_bsr_alloc", test_bsr_alloc, devices=devices)
+add_function_test(
+    TestSparse,
+    "test_bsr_set_zero_row_capacity_after_shrink",
+    test_bsr_set_zero_row_capacity_after_shrink,
+    devices=devices,
+)
 add_function_test(TestSparse, "test_bsr_scaled_expression_add_sub", test_bsr_scaled_expression_add_sub, devices=devices)
 
 if __name__ == "__main__":

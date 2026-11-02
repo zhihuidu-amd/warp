@@ -993,6 +993,7 @@ def test_segmented_sort_pairs_error_unsupported_dtype(test, device):
 
 
 def test_array_sum(test, device):
+    """Verify sums returned on the host or written to an output array."""
     for dtype in (wp.float32, wp.float64):
         with test.subTest(dtype=dtype):
             values = wp.array((1.0, 2.0, 3.0), dtype=dtype, device=device)
@@ -1004,7 +1005,56 @@ def test_array_sum(test, device):
             test.assertEqual(result.numpy()[0], 6.0)
 
 
+def test_array_sum_strided_views(test, device):
+    """Reduce strided views and logical prefixes with host and array outputs."""
+    for dtype in (wp.float32, wp.float64):
+        base = wp.array((1.0, 100.0, 2.0, 200.0, 3.0, 300.0), dtype=dtype, device=device)
+        matrix = wp.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=dtype, device=device)
+        for values in (base[::2], matrix.transpose(), matrix[:, ::2]):
+            for count in (None, values.size, 2):
+                with test.subTest(dtype=dtype, shape=values.shape, strides=values.strides, count=count):
+                    expected = np.sum(values.numpy().flatten()[:count])
+                    test.assertEqual(wp.utils.array_sum(values, value_count=count), expected)
+
+                    result = wp.empty(shape=(1,), dtype=dtype, device=device)
+                    wp.utils.array_sum(values, out=result, value_count=count)
+                    test.assertEqual(result.numpy()[0], expected)
+
+
+def test_array_sum_inner_compact_views(test, device):
+    """Reduce compact transposed inputs without copying their storage."""
+    for dtype in (wp.float32, wp.float64):
+        values = wp.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=dtype, device=device).transpose()
+        other = wp.array(((7.0, 8.0, 9.0), (10.0, 11.0, 12.0)), dtype=dtype, device=device).transpose()
+        sum_out = wp.empty(1, dtype=dtype, device=device)
+        inner_out = wp.empty(1, dtype=dtype, device=device)
+
+        for count in (None, values.size):
+            with test.subTest(dtype=dtype, count=count):
+                with patch.object(wp, "copy", wraps=wp.copy) as copy:
+                    wp.utils.array_sum(values, out=sum_out, value_count=count)
+                    wp.utils.array_inner(values, other, out=inner_out, count=count)
+                    copy.assert_not_called()
+
+                test.assertEqual(sum_out.numpy()[0], 21.0)
+                test.assertEqual(inner_out.numpy()[0], 217.0)
+
+
+def test_array_sum_error_count_exceeds_size(test, device):
+    """Reject sum counts exceeding the logical array or reduction axis."""
+    for dtype in (wp.float32, wp.float64, wp.vec3, wp.mat22):
+        # Padding keeps a missing count guard from overrunning the allocation.
+        base = wp.zeros(24, dtype=dtype, device=device)
+        for values in (base[:6].reshape((2, 3)), base[:0].reshape((0, 3)), base[:0].reshape((2, 0))):
+            for axis in (None, 0, 1, -1, -2):
+                limit = values.size if axis is None else values.shape[axis]
+                with test.subTest(dtype=dtype, shape=values.shape, axis=axis):
+                    with test.assertRaisesRegex(RuntimeError, r"array_sum\(\).*value_count.*exceed"):
+                        wp.utils.array_sum(values, value_count=limit + 1, axis=axis)
+
+
 def test_array_sum_error_out_dtype_mismatch(test, device):
+    """Reject sum output arrays whose data type differs from the input."""
     values = wp.array((1.0, 2.0, 3.0), dtype=wp.float32, device=device)
     result = wp.empty(shape=(1,), dtype=wp.float64, device=device)
     with test.assertRaisesRegex(
@@ -1014,7 +1064,43 @@ def test_array_sum_error_out_dtype_mismatch(test, device):
         wp.utils.array_sum(values, out=result)
 
 
+def test_array_sum_inner_strided_composite_views(test, device):
+    """Reduce strided vector and matrix views by logical element count."""
+    for dtype in (wp.vec3, wp.mat22):
+        data = np.arange(6 * wp._src.types.type_size(dtype), dtype=np.float32).reshape((6, *dtype._shape_))
+        base = wp.array(data, dtype=dtype, device=device)
+        values = base[::2]
+        for count in (None, 2):
+            with test.subTest(dtype=dtype, count=count):
+                expected = data[::2][:count]
+                np.testing.assert_array_equal(wp.utils.array_sum(values, value_count=count), expected.sum(axis=0))
+                test.assertEqual(wp.utils.array_inner(values, values, count=count), np.sum(expected * expected))
+
+
+def test_array_sum_inner_strided_graph(test, device):
+    """Replay strided reductions in a CUDA graph after updating input data."""
+    base = wp.array((1.0, 100.0, 2.0, 200.0, 3.0, 300.0), dtype=wp.float32, device=device)
+    values = base[::2]
+    other = wp.array((4.0, 5.0, 6.0), dtype=wp.float32, device=device)
+    sum_out = wp.empty(1, dtype=wp.float32, device=device)
+    inner_out = wp.empty(1, dtype=wp.float32, device=device)
+
+    with wp.ScopedCapture(device=device, apic=False, force_module_load=False) as capture:
+        wp.utils.array_sum(values, out=sum_out)
+        wp.utils.array_inner(values, other, out=inner_out)
+
+    wp.capture_launch(capture.graph)
+    test.assertEqual(sum_out.numpy()[0], 6.0)
+    test.assertEqual(inner_out.numpy()[0], 32.0)
+
+    base.assign((7.0, 100.0, 8.0, 200.0, 9.0, 300.0))
+    wp.capture_launch(capture.graph)
+    test.assertEqual(sum_out.numpy()[0], 24.0)
+    test.assertEqual(inner_out.numpy()[0], 122.0)
+
+
 def test_array_sum_error_out_shape_mismatch(test, device):
+    """Reject sum output arrays with an incompatible shape."""
     values = wp.array((1.0, 2.0, 3.0), dtype=wp.float32, device=device)
     result = wp.empty(shape=(2,), dtype=wp.float32, device=device)
     with test.assertRaisesRegex(
@@ -1034,6 +1120,7 @@ def test_array_sum_error_unsupported_dtype(test, device):
 
 
 def test_array_inner(test, device):
+    """Verify scalar and vector inner products with host and array outputs."""
     for dtype in (wp.float32, wp.float64, wp.vec3):
         a = wp.array((1.0, 2.0, 3.0), dtype=dtype, device=device)
         b = wp.array((1.0, 2.0, 3.0), dtype=dtype, device=device)
@@ -1049,6 +1136,39 @@ def test_array_inner(test, device):
     a = wp.array((1.0, 2.0, 3.0), dtype=wp.vec3, device=device)
     b = wp.array((1.0, 2.0, 3.0), dtype=wp.types.vector(3, float), device=device)
     test.assertEqual(wp.utils.array_inner(a, b), 14.0)
+
+
+def test_array_inner_strided_views(test, device):
+    """Reduce strided operands and logical prefixes with host and array outputs."""
+    for dtype in (wp.float32, wp.float64):
+        base = wp.array((1.0, 100.0, 2.0, 200.0, 3.0, 300.0), dtype=dtype, device=device)
+        matrix = wp.array(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dtype=dtype, device=device)
+        for view in (base[::2], matrix.transpose(), matrix[:, ::2]):
+            contiguous = wp.array(view.numpy() + 1, dtype=dtype, device=device)
+            for a, b in ((view, view), (view, contiguous), (contiguous, view)):
+                for count in (None, view.size, 2):
+                    with test.subTest(
+                        dtype=dtype, shape=a.shape, a_strides=a.strides, b_strides=b.strides, count=count
+                    ):
+                        expected = np.dot(a.numpy().flatten()[:count], b.numpy().flatten()[:count])
+                        test.assertEqual(wp.utils.array_inner(a, b, count=count), expected)
+
+                        result = wp.empty(shape=(1,), dtype=dtype, device=device)
+                        wp.utils.array_inner(a, b, out=result, count=count)
+                        test.assertEqual(result.numpy()[0], expected)
+
+
+def test_array_inner_error_count_exceeds_size(test, device):
+    """Reject inner-product counts exceeding the logical array or reduction axis."""
+    for dtype in (wp.float32, wp.float64, wp.vec3, wp.mat22):
+        # Padding keeps a missing count guard from overrunning the allocation.
+        base = wp.zeros(24, dtype=dtype, device=device)
+        for values in (base[:6].reshape((2, 3)), base[:0].reshape((0, 3)), base[:0].reshape((2, 0))):
+            for axis in (None, 0, 1, -1, -2):
+                limit = values.size if axis is None else values.shape[axis]
+                with test.subTest(dtype=dtype, shape=values.shape, axis=axis):
+                    with test.assertRaisesRegex(RuntimeError, r"array_inner\(\).*count.*exceed"):
+                        wp.utils.array_inner(values, values, count=limit + 1, axis=axis)
 
 
 def test_array_inner_error_shapes_mismatch(test, device):
@@ -1145,6 +1265,52 @@ def test_array_cast(test, device):
     test.assertEqual(result.dtype, wp.int32)
     test.assertEqual(result.shape, (2, 2))
     assert_np_equal(result.numpy(), np.array(((1, 2), (3, 4)), dtype=int))
+
+
+def test_array_cast_multidim(test, device):
+    for shape in ((3, 4), (2, 3, 2), (2, 1, 3, 2)):
+        expected = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        values = wp.array(expected, dtype=wp.float32, device=device)
+        result = wp.zeros(shape, dtype=wp.float64, device=device)
+        wp.utils.array_cast(values, result)
+        test.assertEqual(result.dtype, wp.float64)
+        test.assertEqual(result.shape, shape)
+        assert_np_equal(result.numpy(), expected.astype(np.float64))
+
+    # A one-dimensional cast still works after the multi-dimensional ones.
+    values = wp.array((1.5, 2.5), dtype=wp.float32, device=device)
+    result = wp.zeros(2, dtype=wp.int32, device=device)
+    wp.utils.array_cast(values, result)
+    assert_np_equal(result.numpy(), np.array((1, 2), dtype=np.int32))
+
+
+def test_array_cast_error_shape_mismatch(test, device):
+    values = wp.zeros((2, 3), dtype=wp.float32, device=device)
+    result = wp.zeros((3, 2), dtype=wp.float64, device=device)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Array shapes do not match \(\(2, 3\) vs \(3, 2\)\)$",
+    ):
+        wp.utils.array_cast(values, result)
+
+
+def test_array_cast_error_count_exceeds_size(test, device):
+    values = wp.array(np.arange(1, 11, dtype=np.float32), device=device)
+    result = wp.zeros(10, dtype=wp.int32, device=device)
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Cast count \(10\) exceeds the input size \(10\) or output size \(3\)$",
+    ):
+        wp.utils.array_cast(values, result[:3])
+
+    with test.assertRaisesRegex(
+        RuntimeError,
+        r"Cast count \(5\) exceeds the input size \(3\) or output size \(10\)$",
+    ):
+        wp.utils.array_cast(values[:3], result, count=5)
+
+    # Nothing may be written past the end of the output view.
+    assert_np_equal(result.numpy(), np.zeros(10, dtype=np.int32))
 
 
 def test_array_cast_error_unsupported_partial_cast(test, device):
@@ -1575,6 +1741,23 @@ add_function_test(
 )
 add_function_test(TestUtils, "test_array_sum", test_array_sum, devices=devices)
 add_function_test(
+    TestUtils, "test_array_sum_error_count_exceeds_size", test_array_sum_error_count_exceeds_size, devices=devices
+)
+add_function_test(TestUtils, "test_array_sum_strided_views", test_array_sum_strided_views, devices=devices)
+add_function_test(TestUtils, "test_array_sum_inner_compact_views", test_array_sum_inner_compact_views, devices=devices)
+add_function_test(
+    TestUtils,
+    "test_array_sum_inner_strided_composite_views",
+    test_array_sum_inner_strided_composite_views,
+    devices=devices,
+)
+add_function_test(
+    TestUtils,
+    "test_array_sum_inner_strided_graph",
+    test_array_sum_inner_strided_graph,
+    devices=get_cuda_test_devices_with_mempool(),
+)
+add_function_test(
     TestUtils, "test_array_sum_error_out_dtype_mismatch", test_array_sum_error_out_dtype_mismatch, devices=devices
 )
 add_function_test(
@@ -1584,6 +1767,10 @@ add_function_test(
     TestUtils, "test_array_sum_error_unsupported_dtype", test_array_sum_error_unsupported_dtype, devices=devices
 )
 add_function_test(TestUtils, "test_array_inner", test_array_inner, devices=devices)
+add_function_test(
+    TestUtils, "test_array_inner_error_count_exceeds_size", test_array_inner_error_count_exceeds_size, devices=devices
+)
+add_function_test(TestUtils, "test_array_inner_strided_views", test_array_inner_strided_views, devices=devices)
 add_function_test(
     TestUtils, "test_array_inner_error_shapes_mismatch", test_array_inner_error_shapes_mismatch, devices=devices
 )
@@ -1600,6 +1787,13 @@ add_function_test(
     TestUtils, "test_array_inner_error_unsupported_dtype", test_array_inner_error_unsupported_dtype, devices=devices
 )
 add_function_test(TestUtils, "test_array_cast", test_array_cast, devices=devices)
+add_function_test(TestUtils, "test_array_cast_multidim", test_array_cast_multidim, devices=devices)
+add_function_test(
+    TestUtils, "test_array_cast_error_shape_mismatch", test_array_cast_error_shape_mismatch, devices=devices
+)
+add_function_test(
+    TestUtils, "test_array_cast_error_count_exceeds_size", test_array_cast_error_count_exceeds_size, devices=devices
+)
 add_function_test(
     TestUtils,
     "test_array_scan_error_device_failure_is_reported",

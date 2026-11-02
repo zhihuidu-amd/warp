@@ -108,6 +108,7 @@ mesh_query_aabb_thread_block(uint64_t id, const vec3& lower, const vec3& upper)
     return query;
 }
 
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline mesh_query_aabb_thread_block_t
 mesh_query_aabb_thread_block_impl(uint64_t id, const vec3& lower, const vec3& upper)
 {
@@ -141,8 +142,7 @@ CUDA_CALLABLE inline int mesh_get_node_index_at_depth(
             return -1;
     }
 
-    for (int i = 0; i < num_expansion_steps; ++i) {
-        int bit_position = num_expansion_steps - 1 - i;
+    for (int bit_position = num_expansion_steps - 1; bit_position >= 0; --bit_position) {
         int lower_upper_select = (lane_id >> bit_position) & 1;
 
         node_index = bvh_load_node(node_lowers_uppers[lower_upper_select], node_index).i;
@@ -165,6 +165,7 @@ CUDA_CALLABLE inline int mesh_get_node_index_at_depth(
 }
 
 // block_size should be a power of 2. 2^num_expansion_steps should be less than or equal to block_size.
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb_thread_block_t& query, int& index)
 {
     int block_size = blockDim.x;
@@ -308,6 +309,7 @@ CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb
 #else
 
 // CPU version: mesh_query_aabb_thread_block_t is aliased to mesh_query_aabb_t, so just use regular mesh query
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline mesh_query_aabb_thread_block_t
 mesh_query_aabb_thread_block_impl(uint64_t id, const vec3& lower, const vec3& upper)
 {
@@ -316,6 +318,7 @@ mesh_query_aabb_thread_block_impl(uint64_t id, const vec3& lower, const vec3& up
 }
 
 // CPU version: single-threaded, just calls regular mesh_query_aabb_next
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline bool mesh_query_aabb_next_thread_block_impl(mesh_query_aabb_thread_block_t& query, int& index)
 {
     // On CPU, mesh_query_aabb_thread_block_t is just mesh_query_aabb_t, so call regular mesh_query_aabb_next
@@ -338,6 +341,7 @@ template <int Length> CUDA_CALLABLE inline auto tile_mesh_query_aabb_next_impl(m
 }
 
 // Wrapper that works for any block size
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline auto tile_mesh_query_aabb_next(mesh_query_aabb_thread_block_t& query)
 {
     return tile_mesh_query_aabb_next_impl<WP_TILE_BLOCK_DIM>(query);
@@ -353,6 +357,7 @@ CUDA_CALLABLE inline bool tile_query_valid(const mesh_query_aabb_thread_block_t&
 }
 
 // New tile-based alias for the query function
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline mesh_query_aabb_thread_block_t
 tile_mesh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
 {
@@ -383,6 +388,7 @@ template <int Length> inline auto tile_mesh_query_aabb_next_impl(mesh_query_aabb
     return result;
 }
 
+WP_COMPILE_IF_USED
 inline auto tile_mesh_query_aabb_next(mesh_query_aabb_thread_block_t& query)
 {
     return tile_mesh_query_aabb_next_impl<WP_TILE_BLOCK_DIM>(query);
@@ -391,6 +397,7 @@ inline auto tile_mesh_query_aabb_next(mesh_query_aabb_thread_block_t& query)
 inline bool tile_query_valid(const mesh_query_aabb_thread_block_t& query) { return query.last_query_valid; }
 
 // CPU version: tile_mesh_query_aabb just creates a regular query
+WP_COMPILE_IF_USED
 inline mesh_query_aabb_thread_block_t tile_mesh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
 {
     // On CPU, this is just mesh_query_aabb since mesh_query_aabb_thread_block_t = mesh_query_aabb_t

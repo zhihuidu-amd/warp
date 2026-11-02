@@ -6,25 +6,28 @@
 // Internal lane-participation masks for tile warp collectives, not logical
 // tile masks. Keep this block before builtin.h because its tile headers use it.
 //
-// A CUDA warp is 32 lanes; an AMD wavefront is 64. Anything that indexes lanes
-// or builds a lane mask has to follow, so the width and the mask type are
-// selected together. HIP enforces the pairing: __ballot_sync static_asserts
-// that the mask is 64-bit and returns unsigned long long, so a 32-bit mask is a
-// compile error rather than a silent truncation.
+// HIP: a wavefront is 64 lanes, so the width and the mask type are pre-defined
+// together, ahead of the guarded defaults below. See hip_tile_lane.h. That makes
+// the note below that nothing pre-defines them true of upstream only, not of HIP.
 #if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
-#define WP_TILE_WARP_SIZE 64
+#include "hip_tile_lane.h"
+#endif
 
-#define WP_TILE_LANE_MASK_ALL 0xffffffffffffffffull
-#define WP_TILE_LANE_MASK_POPC(mask) __popcll(mask)
-// __ffs must widen with the mask for the same reason __popc does. HIP overloads
-// __ffs(int) and __ffsll(long long), so passing a 64-bit mask to __ffs is
-// ambiguous rather than truncating -- "call to '__ffs' is ambiguous".
-#define WP_TILE_LANE_MASK_FFS(mask) __ffsll(mask)
-#else
+// Each macro is guarded so a build targeting a different lane width can
+// pre-define the whole set consistently, without patching this file. Nothing in
+// this tree pre-defines them, so the definitions below are what every build here
+// gets.
+#ifndef WP_TILE_WARP_SIZE
 #define WP_TILE_WARP_SIZE 32
+#endif
 
+#ifndef WP_TILE_LANE_MASK_ALL
 #define WP_TILE_LANE_MASK_ALL 0xffffffffu
+#endif
+#ifndef WP_TILE_LANE_MASK_POPC
 #define WP_TILE_LANE_MASK_POPC(mask) __popc(mask)
+#endif
+#ifndef WP_TILE_LANE_MASK_FFS
 #define WP_TILE_LANE_MASK_FFS(mask) __ffs(mask)
 #endif
 
@@ -814,10 +817,6 @@ template <typename T, typename Shape_, bool BoundsCheck = true, bool Aligned = f
     array_t<T> data;
     Coord offset;
 
-    // CUDA_CALLABLE: constructed by tile_load() from device code. clang (and
-    // therefore hiprtc) rejects a host-only constructor called from a
-    // __host__ __device__ function; NVRTC does not, so this is invisible on
-    // NVIDIA.
     inline CUDA_CALLABLE tile_global_t(array_t<T>& a, const Coord& c)
         : data(a)
         , offset(c)
@@ -1136,13 +1135,6 @@ template <typename T, typename L> struct tile_register_t {
 
     // apply a lambda to all valid entries in the tile
     // Op should be a functor that takes a register index and tile_coord_t as input
-    //
-    // CUDA_CALLABLE: every caller (grad_add, atomic_add, grad_zero_global) is
-    // CUDA_CALLABLE, so without it this is a host function called from device
-    // code and the lambda argument is what the diagnostic names:
-    //
-    //     error: reference to __host__ function 'apply<(lambda at tile.h:1101)>'
-    //            in __host__ __device__ function
     template <typename Op> inline CUDA_CALLABLE void apply(Op op)
     {
         WP_PRAGMA_UNROLL
@@ -1223,14 +1215,7 @@ template <typename T, typename L> struct tile_register_t {
 // helper to allocate a register tile like another tile
 // users can either specify a template explicitly or
 // pass in another concrete instance
-// CUDA_CALLABLE, matching the explicit-shape overload below. Without it this
-// is a host function called from device code:
-//
-//     error: reference to __host__ function 'tile_register_like<...>' in
-//            __host__ __device__ function
-//
-// Reached from adj_tile_sum in tile_reduce.h, which is device-only.
-template <typename Tile> inline CUDA_CALLABLE auto tile_register_like(Tile* t = nullptr)
+template <typename Tile> CUDA_CALLABLE auto tile_register_like(Tile* t = nullptr)
 {
     using T = typename Tile::Type;
     using L = typename Tile::Layout;
@@ -1249,15 +1234,17 @@ template <typename Shape, typename T> inline CUDA_CALLABLE auto tile_register_li
 }
 
 // helper to construct a register tile from a type and a list of dims
-template <typename T, int... Dims> auto tile_register()
+template <typename T, int... Dims> CUDA_CALLABLE auto tile_register()
 {
     return tile_register_t<T, tile_layout_register_t<tile_shape_t<Dims...>>>();
 }
 
+// must match tile.alignment in Python types.py
+constexpr int tile_alignment = 16;
+
 inline CUDA_CALLABLE int tile_align(int num_bytes)
 {
-    // note this much match value in Python types.py
-    const int alignment = 16;
+    const int alignment = tile_alignment;
 
     const int num_bytes_abs = num_bytes < 0 ? -num_bytes : num_bytes;
     const int sign = num_bytes < 0 ? -1 : 1;
@@ -1408,10 +1395,12 @@ public:
         // Keep this path separate from the checked CPU arithmetic below. NVRTC
         // targeting sm_89 otherwise fails to hoist repeated shared-memory
         // address calculations in tiled kernels.
-        const unsigned int offset = smem_base[WP_TILE_THREAD_IDX];
+        // The counter is kept in alignment units so the compiler can prove each
+        // offset is aligned and vectorize shared-memory accesses to the tile.
+        const unsigned int offset = smem_base[WP_TILE_THREAD_IDX] * tile_alignment;
 
         // one entry per-thread so no need for synchronization
-        smem_base[WP_TILE_THREAD_IDX] += tile_align(num_bytes);
+        smem_base[WP_TILE_THREAD_IDX] += tile_align(num_bytes) / tile_alignment;
 #else
         const int thread_idx = WP_TILE_THREAD_IDX;
         const unsigned int offset = smem_base[thread_idx];
@@ -1575,11 +1564,6 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
     struct Storage {
         T* ptr;
 
-        // CUDA_CALLABLE: this is constructed from device code (tile_shared_t's
-        // own constructors initialise data/grad), and clang -- which is what
-        // hiprtc is -- rejects calling a host-only constructor from a
-        // __host__ __device__ function. NVRTC tolerates it, so the omission is
-        // invisible on NVIDIA.
         inline CUDA_CALLABLE Storage(T* p)
             : ptr(p)
         {
@@ -1946,7 +1930,8 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                 // use shared memory atomics to accumulate gradients
                 // since for broadcast tiles (e.g.: a bias vector) multiple incoming threads
                 // may map to a single location in shared memory
-                tile_adj_atomic_add_value(&grad(linear), tile.data[i]);
+                // Convert contributions to this tile's gradient dtype before accumulation.
+                tile_adj_atomic_add_value(&grad(linear), T(tile.data[i]));
         }
 
         WP_TILE_SYNC();
@@ -2071,7 +2056,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                     char* dest_bytes = reinterpret_cast<char*>(dest.data.data) + base_bytes;
                     float4* dest128 = reinterpret_cast<float4*>(dest_bytes);
                     assert(((uint64_t)data.ptr) % sizeof(float4) == 0 && "shared tile pointer not 16-byte aligned");
-                    const float4* src128 = (const float4*)data.ptr;
+                    const float4* src128 = reinterpret_cast<const float4*>(data.ptr);
 
                     using F4Layout
                         = tile_layout_strided_t<typename tile_shape_f4<typename Layout::Shape, (int)sizeof(T)>::type>;
@@ -2230,7 +2215,7 @@ template <typename T, typename L, bool Owner_ = true> struct tile_shared_t {
                     const char* src_bytes = reinterpret_cast<const char*>(src.data.data) + base_bytes;
                     const float4* src128 = reinterpret_cast<const float4*>(src_bytes);
                     assert(((uint64_t)data.ptr) % sizeof(float4) == 0 && "shared tile pointer not 16-byte aligned");
-                    float4* dest128 = (float4*)data.ptr;
+                    float4* dest128 = reinterpret_cast<float4*>(data.ptr);
 
                     using F4Layout
                         = tile_layout_strided_t<typename tile_shape_f4<typename Layout::Shape, (int)sizeof(T)>::type>;
@@ -2612,7 +2597,8 @@ template <typename T, typename Shape, typename Strides, bool RequiresGrad> inlin
 
     // initialize tile to quiet nan
     uint32_t qnanbits = 0x7FC00000;
-    float qnan = *(float*)(&qnanbits);
+    float qnan;
+    memcpy(&qnan, &qnanbits, sizeof(qnan));
 
     for (int i = WP_TILE_THREAD_IDX; i < size; i += WP_TILE_BLOCK_DIM)
         data[i] = T(qnan);
@@ -4315,16 +4301,50 @@ inline CUDA_CALLABLE void adj_tile_map(
     adj_to_tile<Shape>(adj_t8, adj_r8);
 }
 
+// Builtins registered with require_original_output_arg=True (e.g. exp, sqrt, div, pow) have adjoints that also take
+// the forward result, e.g. adj_exp(x, ret, adj_x, adj_ret). These helpers call that form when the adjoint accepts it,
+// recomputing ret as adj_cw_div does below, and otherwise the form without it that user functions and other builtins
+// use. Passing 0 makes overload resolution prefer the `int` overload whenever its return type is well-formed.
+template <typename AdjOp, typename Op, typename T, typename AdjT, typename AdjRet>
+inline CUDA_CALLABLE auto tile_map_call_adj(AdjOp adj_op, Op op, T x, AdjT& adj_x, AdjRet adj_ret, int)
+    -> decltype(adj_op(x, op(x), adj_x, adj_ret), void())
+{
+    adj_op(x, op(x), adj_x, adj_ret);
+}
+
+template <typename AdjOp, typename Op, typename T, typename AdjT, typename AdjRet>
+inline CUDA_CALLABLE void tile_map_call_adj(AdjOp adj_op, Op op, T x, AdjT& adj_x, AdjRet adj_ret, long)
+{
+    adj_op(x, adj_x, adj_ret);
+}
+
+template <typename AdjOp, typename Op, typename T, typename U, typename AdjT, typename AdjU, typename AdjRet>
+inline CUDA_CALLABLE auto
+tile_map_call_adj(AdjOp adj_op, Op op, T x, U y, AdjT& adj_x, AdjU& adj_y, AdjRet adj_ret, int)
+    -> decltype(adj_op(x, y, op(x, y), adj_x, adj_y, adj_ret), void())
+{
+    adj_op(x, y, op(x, y), adj_x, adj_y, adj_ret);
+}
+
+template <typename AdjOp, typename Op, typename T, typename U, typename AdjT, typename AdjU, typename AdjRet>
+inline CUDA_CALLABLE void
+tile_map_call_adj(AdjOp adj_op, Op op, T x, U y, AdjT& adj_x, AdjU& adj_y, AdjRet adj_ret, long)
+{
+    adj_op(x, y, adj_x, adj_y, adj_ret);
+}
+
 // We wrap the operator in a lambda so that we don't have to do overload resolution for things like e.g.: wp.sin()
 // this is important because many of the builtin operators don't follow particular conventions on references for
 // the `adj_ret` parameter, which means it's not possible to figure out the overload we need using simple casting.
 // The return type is automatically deduced from the operation result using decltype.
+// adj_op reaches tile_map_call_adj() through a forwarding lambda whose return type is decltype(adj_op(args...)), so
+// a call with the wrong arguments is a substitution failure rather than a hard error.
 
 #define tile_unary_map(op, a) tile_map([](auto x) { return op(x);}, a)
-#define adj_tile_unary_map(op, a, adj_op, adj_a, adj_ret) adj_tile_map([](auto x) { return op(x);}, a, [](auto x, auto& adj_x, auto adj_ret) { adj_op(x, adj_x, adj_ret);}, adj_a, adj_ret)
+#define adj_tile_unary_map(op, a, adj_op, adj_a, adj_ret) adj_tile_map([](auto x) { return op(x);}, a, [](auto x, auto& adj_x, auto adj_ret) { wp::tile_map_call_adj([](auto&&... args) -> decltype(adj_op(args...)) { return adj_op(args...);}, [](auto x) { return op(x);}, x, adj_x, adj_ret, 0);}, adj_a, adj_ret)
 
 #define tile_binary_map(op, a, b) tile_map([](auto x, auto y) { return op(x, y);}, a, b)
-#define adj_tile_binary_map(op, a, b, adj_op, adj_a, adj_b, adj_ret) adj_tile_map([](auto x, auto y) { return op(x, y);}, a, b, [](auto x, auto y, auto& adj_x, auto& adj_y, auto adj_ret) { adj_op(x, y, adj_x, adj_y, adj_ret);}, adj_a, adj_b, adj_ret)
+#define adj_tile_binary_map(op, a, b, adj_op, adj_a, adj_b, adj_ret) adj_tile_map([](auto x, auto y) { return op(x, y);}, a, b, [](auto x, auto y, auto& adj_x, auto& adj_y, auto adj_ret) { wp::tile_map_call_adj([](auto&&... args) -> decltype(adj_op(args...)) { return adj_op(args...);}, [](auto x, auto y) { return op(x, y);}, x, y, adj_x, adj_y, adj_ret, 0);}, adj_a, adj_b, adj_ret)
 
 // Wrapper for scalar adj_div to match the 5-arg interface expected by adj_tile_binary_map.
 // Scalar adj_div takes 6 args (includes ret), but adj_tile_binary_map only passes 5.
@@ -4763,18 +4783,21 @@ template <typename Tile, typename... Indices> inline CUDA_CALLABLE auto tile_ext
     }
 }
 
-template <typename Tile> auto tile_extract(Tile& t, int i) { return tile_extract_impl(t, i); }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j) { return tile_extract_impl(t, i, j); }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k) { return tile_extract_impl(t, i, j, k); }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k, int l)
+template <typename Tile> CUDA_CALLABLE auto tile_extract(Tile& t, int i) { return tile_extract_impl(t, i); }
+template <typename Tile> CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j) { return tile_extract_impl(t, i, j); }
+template <typename Tile> CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k)
+{
+    return tile_extract_impl(t, i, j, k);
+}
+template <typename Tile> CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k, int l)
 {
     return tile_extract_impl(t, i, j, k, l);
 }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k, int l, int m)
+template <typename Tile> CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k, int l, int m)
 {
     return tile_extract_impl(t, i, j, k, l, m);
 }
-template <typename Tile> auto tile_extract(Tile& t, int i, int j, int k, int l, int m, int n)
+template <typename Tile> CUDA_CALLABLE auto tile_extract(Tile& t, int i, int j, int k, int l, int m, int n)
 {
     return tile_extract_impl(t, i, j, k, l, m, n);
 }
@@ -4810,29 +4833,30 @@ inline CUDA_CALLABLE void adj_tile_extract_impl(Tile& t, AdjTile& adj_t, AdjType
 }
 
 template <typename Tile, typename AdjTile>
-void adj_tile_extract(Tile& t, int i, AdjTile& adj_t, int adj_i, typename Tile::Type adj_ret)
+CUDA_CALLABLE void adj_tile_extract(Tile& t, int i, AdjTile& adj_t, int adj_i, typename Tile::Type adj_ret)
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(Tile& t, int i, int j, AdjTile& adj_t, int adj_i, int adj_j, AdjType adj_ret)
+CUDA_CALLABLE void adj_tile_extract(Tile& t, int i, int j, AdjTile& adj_t, int adj_i, int adj_j, AdjType adj_ret)
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(Tile& t, int i, int j, int k, AdjTile& adj_t, int adj_i, int adj_j, int adj_k, AdjType adj_ret)
+CUDA_CALLABLE void
+adj_tile_extract(Tile& t, int i, int j, int k, AdjTile& adj_t, int adj_i, int adj_j, int adj_k, AdjType adj_ret)
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j, k);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(
+CUDA_CALLABLE void adj_tile_extract(
     Tile& t, int i, int j, int k, int l, AdjTile& adj_t, int adj_i, int adj_j, int adj_k, int adj_l, AdjType adj_ret
 )
 {
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j, k, l);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(
+CUDA_CALLABLE void adj_tile_extract(
     Tile& t,
     int i,
     int j,
@@ -4851,7 +4875,7 @@ void adj_tile_extract(
     adj_tile_extract_impl(t, adj_t, adj_ret, i, j, k, l, m);
 }
 template <typename Tile, typename AdjTile, typename AdjType>
-void adj_tile_extract(
+CUDA_CALLABLE void adj_tile_extract(
     Tile& t,
     int i,
     int j,
@@ -5276,100 +5300,107 @@ inline CUDA_CALLABLE void adj_tile_scatter_masked(
 }
 
 
-template <typename Tile> void tile_add_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_add_inplace(Tile& t, int i, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_add_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_add_inplace(Tile& t, int i, int j, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_add_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_add_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_add_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_add_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.add_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_sub_inplace(Tile& t, int i, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_sub_inplace(Tile& t, int i, int j, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_sub_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_sub_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_sub_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.sub_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_and_inplace(Tile& t, int i, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_and_inplace(Tile& t, int i, int j, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_bit_and_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_bit_and_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_bit_and_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.bit_and_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_or_inplace(Tile& t, int i, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_or_inplace(Tile& t, int i, int j, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_or_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_bit_or_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_bit_or_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.bit_or_inplace(tile_coord(i, j, k, l), value);
 }
 
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_xor_inplace(Tile& t, int i, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i), value);
 }
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, int j, typename Tile::Type value)
+template <typename Tile> CUDA_CALLABLE void tile_bit_xor_inplace(Tile& t, int i, int j, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i, j), value);
 }
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_bit_xor_inplace(Tile& t, int i, int j, int k, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i, j, k), value);
 }
-template <typename Tile> void tile_bit_xor_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
+template <typename Tile>
+CUDA_CALLABLE void tile_bit_xor_inplace(Tile& t, int i, int j, int k, int l, typename Tile::Type value)
 {
     t.bit_xor_inplace(tile_coord(i, j, k, l), value);
 }
 
 template <typename Tile, typename AdjTile>
-void adj_tile_add_inplace(
+CUDA_CALLABLE void adj_tile_add_inplace(
     Tile& t, int i, typename Tile::Type value, AdjTile& adj_t, int adj_i, typename Tile::Type& adj_value
 )
 {
     adj_t.adj_add_inplace(tile_coord(i), adj_value);
 }
 template <typename Tile, typename AdjTile>
-void adj_tile_add_inplace(
+CUDA_CALLABLE void adj_tile_add_inplace(
     Tile& t,
     int i,
     int j,
@@ -5383,7 +5414,7 @@ void adj_tile_add_inplace(
     adj_t.adj_add_inplace(tile_coord(i, j), adj_value);
 }
 template <typename Tile, typename AdjTile>
-void adj_tile_add_inplace(
+CUDA_CALLABLE void adj_tile_add_inplace(
     Tile& t,
     int i,
     int j,
@@ -5399,7 +5430,7 @@ void adj_tile_add_inplace(
     adj_t.adj_add_inplace(tile_coord(i, j, k), adj_value);
 }
 template <typename Tile, typename AdjTile>
-void adj_tile_add_inplace(
+CUDA_CALLABLE void adj_tile_add_inplace(
     Tile& t,
     int i,
     int j,
@@ -5418,14 +5449,14 @@ void adj_tile_add_inplace(
 }
 
 template <typename Tile, typename AdjTile>
-void adj_tile_sub_inplace(
+CUDA_CALLABLE void adj_tile_sub_inplace(
     Tile& t, int i, typename Tile::Type value, AdjTile& adj_t, int adj_i, typename Tile::Type& adj_value
 )
 {
     adj_t.adj_sub_inplace(tile_coord(i), adj_value);
 }
 template <typename Tile, typename AdjTile>
-void adj_tile_sub_inplace(
+CUDA_CALLABLE void adj_tile_sub_inplace(
     Tile& t,
     int i,
     int j,
@@ -5439,7 +5470,7 @@ void adj_tile_sub_inplace(
     adj_t.adj_sub_inplace(tile_coord(i, j), adj_value);
 }
 template <typename Tile, typename AdjTile>
-void adj_tile_sub_inplace(
+CUDA_CALLABLE void adj_tile_sub_inplace(
     Tile& t,
     int i,
     int j,
@@ -5455,7 +5486,7 @@ void adj_tile_sub_inplace(
     adj_t.adj_sub_inplace(tile_coord(i, j, k), adj_value);
 }
 template <typename Tile, typename AdjTile>
-void adj_tile_sub_inplace(
+CUDA_CALLABLE void adj_tile_sub_inplace(
     Tile& t,
     int i,
     int j,
@@ -6027,8 +6058,8 @@ inline CUDA_CALLABLE void adj_tile_assign(
     tile_register_t<typename TileA::Type, GradLayout> staged;
 
     // linear_from_register() is monotone, so after the first invalid
-    // register slot all later slots are invalid too. The accumulation loop
-    // uses the same guard before reading staged.data[reg].
+    // register slot all later slots are invalid too. grad_add() uses the
+    // same guard before reading staged.data[reg].
     WP_PRAGMA_UNROLL
     for (int reg = 0; reg < GradLayout::NumRegs; ++reg) {
         int linear = GradLayout::linear_from_register(reg);
@@ -6052,16 +6083,9 @@ inline CUDA_CALLABLE void adj_tile_assign(
     // zeroing must complete before accumulating into (potentially aliasing) src gradients
     WP_TILE_SYNC();
 
-    WP_PRAGMA_UNROLL
-    for (int reg = 0; reg < GradLayout::NumRegs; ++reg) {
-        int linear = GradLayout::linear_from_register(reg);
-        if (!GradLayout::valid(linear)) {
-            break;
-        }
-        src.grad(GradLayout::coord_from_linear(linear)) += staged.data[reg];
-    }
-
-    WP_TILE_SYNC();
+    // src may be a broadcast view whose coordinates share one gradient element;
+    // grad_add() accumulates atomically for such non-unique layouts
+    src.grad_add(staged);
 }
 
 template <
@@ -6252,7 +6276,7 @@ template <typename T, int Capacity> struct tile_stack_t {
         return *this;
     }
 
-    ~tile_stack_t()
+    inline CUDA_CALLABLE ~tile_stack_t()
     {
         // LIFO: free counter first (allocated last), then data.
         // Null-pointer guard: adjoint variables are default-constructed with

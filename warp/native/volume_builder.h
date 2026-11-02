@@ -247,10 +247,8 @@ CUDA_CALLABLE inline uint32_t rebuild_find_lowest_on(uint64_t word)
         return 64u;
     }
 #if defined(__CUDA_ARCH__)
-    // Cast explicitly: HIP declares __ffsll for both long long and unsigned
-    // long long, so a uint64_t argument matches neither exactly and the call is
-    // ambiguous. CUDA declares a single overload, so the bare call compiles
-    // there and this only surfaces on HIP.
+    // Cast explicitly: uint64_t matches no __ffsll overload exactly, so the
+    // bare call relies on exactly one integer overload being visible.
     return uint32_t(__ffsll(static_cast<unsigned long long>(word)) - 1);
 #else
     for (uint32_t i = 0; i < 64u; ++i) {

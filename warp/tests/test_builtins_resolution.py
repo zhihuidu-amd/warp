@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from warp._src.builtins import tile_full_value_func, tile_randf_dispatch_func, tile_randi_dispatch_func
 from warp._src.codegen import Var
-from warp._src.context import Function, get_builtin_call_desc
+from warp._src.context import Function, add_builtin, get_builtin_call_desc
 from warp.tests.unittest_utils import *
 
 
@@ -150,6 +151,47 @@ def test_identity_builtins_match_kernel_scope(test, device):
 
 
 class TestBuiltinsResolution(unittest.TestCase):
+    def test_missing_registered_builtin_symbol_is_reported(self):
+        """Report a missing native symbol for an otherwise valid registered export."""
+        overload = next(
+            overload for overload in wp.sin.overloads if tuple(overload.input_types.values()) == (wp.float32,)
+        )
+
+        get_builtin_call_desc.cache_clear()
+        self.addCleanup(get_builtin_call_desc.cache_clear)
+        with mock.patch.object(overload, "mangled_name", "wp_builtin_missing_sin_float32"):
+            with self.assertRaises(AttributeError):
+                wp.sin(0.0)
+
+    def test_existing_symbol_does_not_make_invalid_builtin_exportable(self):
+        """Reject an invalid built-in whose mangled name collides with an existing symbol."""
+        colliding_builtin = Function(
+            func=None,
+            key="sin",
+            namespace="wp::",
+            input_types={"value": wp.float32},
+            value_func=lambda arg_types, arg_values: wp._src.types.Reference(wp.float32),
+            export=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Couldn't find a function 'sin' compatible"):
+            colliding_builtin(1.0)
+
+    def test_late_registered_builtin_does_not_trust_existing_symbol(self):
+        """Reject a late overload whose native name collides with a bundled export."""
+        add_builtin(
+            "sin",
+            input_types={"value": wp.float32, "ignored": wp.int32},
+            value_func=lambda arg_types, arg_values: wp._src.types.Reference(wp.float32),
+            export_func=lambda input_types: {"value": input_types["value"]},
+        )
+        self.addCleanup(wp.sin.overloads.remove, wp.sin.overloads[-1])
+        get_builtin_call_desc.cache_clear()
+        self.addCleanup(get_builtin_call_desc.cache_clear)
+
+        with self.assertRaisesRegex(RuntimeError, "Couldn't find a function 'sin' compatible"):
+            wp.sin(0.0, 0)
+
     def test_builtin_fallback_does_not_retry_primary_shape(self):
         """Evaluate primary-shape overloads only once before falling back."""
         overload_group = make_mul_builtin({"a": wp.float32, "b": wp.float32}, wp.float32)
@@ -378,6 +420,21 @@ class TestBuiltinsResolution(unittest.TestCase):
             with self.subTest(name=name):
                 result = overload_group(**kwargs)
                 np.testing.assert_allclose(result, expected)
+
+    def test_builtin_overloads_with_shared_parameter_names_use_selected_default(self):
+        """Apply each overload's default to positional and keyword calls."""
+        overload_group = make_mul_builtin({"a": wp.float32, "b": wp.float32}, wp.float32)
+        overload_group.add_overload(make_mul_builtin({"x": wp.vec2f, "s": wp.float32}, wp.vec2f, defaults={"s": 2.0}))
+        overload_group.add_overload(make_mul_builtin({"x": wp.vec3f, "s": wp.float32}, wp.vec3f, defaults={"s": 3.0}))
+
+        for vector, expected in (
+            (wp.vec2f(1.0, 1.0), (2.0, 2.0)),
+            (wp.vec3f(1.0, 1.0, 1.0), (3.0, 3.0, 3.0)),
+        ):
+            with self.subTest(vector=type(vector).__name__, call="keyword"):
+                np.testing.assert_allclose(overload_group(x=vector), expected)
+            with self.subTest(vector=type(vector).__name__, call="positional"):
+                np.testing.assert_allclose(overload_group(vector), expected)
 
     def test_builtin_overload_required_parameter(self):
         """Reject calls missing a parameter required by the selected Python-scope overload."""

@@ -24,14 +24,12 @@ WP_TILE_DEFAULT_DEVICE_BEGIN
 // memory, so every shuffle below has a stride of at most 16 and stays inside its
 // group. The overloads below are not full-warp collectives when WP_TILE_WARP_SIZE
 // differs from WP_TILE_BITONIC_GROUP_SIZE.
+//
+// The group size is a property of the algorithm and stays 32 everywhere: the
+// stride-16 bound above is what keeps a 32-lane group correct, so it is not
+// overridable. Only the participation mask is lane-width dependent.
 #define WP_TILE_BITONIC_GROUP_SIZE 32
-// The group size stays 32 on every backend -- it is a property of the algorithm,
-// not of the hardware. Only the mask has to widen: HIP's __shfl_xor_sync
-// static_asserts that the mask is 64-bit, so a 32-bit literal is a compile error
-// rather than a silent truncation, exactly as for __ballot_sync in tile.h.
-#if defined(WP_ENABLE_HIP) && WP_ENABLE_HIP
-#define WP_TILE_BITONIC_GROUP_MASK 0xffffffffffffffffull
-#else
+#ifndef WP_TILE_BITONIC_GROUP_MASK
 #define WP_TILE_BITONIC_GROUP_MASK 0xffffffffu
 #endif
 
@@ -657,6 +655,61 @@ bitonic_sort_thread_block_direct(int thread_id, uint64_t* keys_input, V* values_
     );
 }
 
+// The bitonic sorts above shuffle keys within fixed 32-lane groups, so they need whole groups.
+constexpr bool tile_sort_block_has_whole_bitonic_groups = WP_TILE_BLOCK_DIM % WP_TILE_BITONIC_GROUP_SIZE == 0;
+
+// The radix sort below reads per-warp totals from the last lane of each warp, so it needs whole warps.
+constexpr bool tile_sort_block_has_whole_warps = WP_TILE_BLOCK_DIM % WP_TILE_WARP_SIZE == 0;
+
+template <typename K, typename V>
+inline CUDA_CALLABLE void compare_and_swap_ascending(K* keys, V* values, int i, int j, int length)
+{
+    // Positions at or beyond length hold virtual +inf keys that never move.
+    if (j < length && keys[j] < keys[i]) {
+        // Read both pairs before writing either, so the swap stays correct when keys and values
+        // are the same tile.
+        const K key_i = keys[i];
+        const K key_j = keys[j];
+        const V value_i = values[i];
+        const V value_j = values[j];
+
+        keys[i] = key_j;
+        keys[j] = key_i;
+        values[i] = value_j;
+        values[j] = value_i;
+    }
+}
+
+// Sorts in place with any block dimension, using only shared memory and block barriers.
+// Every comparator moves the smaller key to the lower position, so the network sorts
+// next_higher_pow2(length) positions without padding the keys beyond length.
+template <typename K, typename V>
+inline CUDA_CALLABLE void bitonic_sort_thread_block_any_dim(int thread_id, K* keys, V* values, int length)
+{
+    const int num_pairs = next_higher_pow2(length) / 2;
+
+    __syncthreads();
+    for (int k = 2; k <= 2 * num_pairs; k <<= 1) {
+        // Merge each pair of sorted runs of length k / 2 by comparing mirrored positions.
+        const int run_length = k / 2;
+        for (int pair = thread_id; pair < num_pairs; pair += WP_TILE_BLOCK_DIM) {
+            const int offset = pair & (run_length - 1);
+            const int base = (pair - offset) * 2;
+            compare_and_swap_ascending(keys, values, base + offset, base + k - 1 - offset, length);
+        }
+        __syncthreads();
+
+        // Each half is now bitonic, so finish the merge with half cleaners.
+        for (int stride = k / 4; stride > 0; stride >>= 1) {
+            for (int pair = thread_id; pair < num_pairs; pair += WP_TILE_BLOCK_DIM) {
+                const int i = 2 * pair - (pair & (stride - 1));
+                compare_and_swap_ascending(keys, values, i, i + stride, length);
+            }
+            __syncthreads();
+        }
+    }
+}
+
 // End bitonic sort
 
 // Position of `lane` among the lanes set in `ballot_mask`, counting itself.
@@ -712,8 +765,6 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
     const int lowest_bits_mask = (1 << bits_per_pass) - 1;
     const int num_scan_buckets = (1 << bits_per_pass);
 
-    const int num_warp_passes = (num_scan_buckets + num_warps - 1) / num_warps;
-
     __shared__ int buckets[num_scan_buckets];
     __shared__ int buckets2[num_scan_buckets];
     __shared__ int buckets_cumulative_sum[num_scan_buckets];
@@ -746,7 +797,7 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
             }
             __syncthreads();
 
-            for (int b = warp_id; b < num_warp_passes * num_warps; b += num_warps) {
+            for (int b = warp_id; b < num_scan_buckets; b += num_warps) {
                 int f = lane_id < num_warps ? shared_mem[lane_id][b] : 0;
                 f = warp_scan_inclusive(lane_id, f);
                 if (lane_id == WP_TILE_WARP_SIZE - 1)
@@ -773,13 +824,14 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
 #endif
 
         if (warp_id == 0) {
-            int value = lane_id < num_scan_buckets ? buckets[lane_id] : 0;
-            value = warp_scan_exclusive(lane_id, value);
+            int count = lane_id < num_scan_buckets ? buckets[lane_id] : 0;
+            int value = warp_scan_exclusive(lane_id, count);
             if (lane_id < num_scan_buckets)
                 buckets_cumulative_sum[lane_id] = value;
 
+            // The exclusive sum stops short of the last bucket, so add its count to get the total.
             if (lane_id == num_scan_buckets - 1)
-                assert(value == num_elements_to_sort);
+                assert(value + count == num_elements_to_sort);
         }
 
         __syncthreads();
@@ -896,14 +948,6 @@ inline CUDA_CALLABLE void radix_sort_thread_block_core(
                 values_tmp[j] = values_input[j];
             }
         }
-
-        auto tmp = keys_tmp;
-        keys_tmp = keys_input;
-        keys_input = tmp;
-
-        auto tmp2 = values_tmp;
-        values_tmp = values_input;
-        values_input = tmp2;
     }
 }
 
@@ -955,7 +999,9 @@ template <typename TileK, typename TileV> CUDA_CALLABLE_DEVICE void tile_sort(Ti
 
     // Trim away the code that won't be used - possible because the number of elements to sort is known at compile time
     if constexpr (num_elements_to_sort <= BITONIC_SORT_THRESHOLD || sizeof(T) > 4) {
-        if constexpr (is_power_of_two(num_elements_to_sort))
+        if constexpr (!tile_sort_block_has_whole_bitonic_groups)
+            bitonic_sort_thread_block_any_dim(WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort);
+        else if constexpr (is_power_of_two(num_elements_to_sort))
             bitonic_sort_thread_block_direct<num_elements_to_sort, V>(
                 WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort
             );
@@ -963,6 +1009,8 @@ template <typename TileK, typename TileV> CUDA_CALLABLE_DEVICE void tile_sort(Ti
             bitonic_sort_thread_block_shared_mem<num_elements_to_sort, V>(
                 WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort
             );
+    } else if constexpr (!tile_sort_block_has_whole_warps) {
+        bitonic_sort_thread_block_any_dim(WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort);
     } else {
         __shared__ T keys_tmp[num_elements_to_sort];
         __shared__ V values_tmp[num_elements_to_sort];
@@ -989,7 +1037,9 @@ CUDA_CALLABLE_DEVICE void tile_sort(TileK& t, TileV& t2, int start, int length)
     V* values = &t2.data(start);
 
     if (num_elements_to_sort <= BITONIC_SORT_THRESHOLD || sizeof(T) > 4) {
-        if (is_power_of_two(num_elements_to_sort))
+        if constexpr (!tile_sort_block_has_whole_bitonic_groups)
+            bitonic_sort_thread_block_any_dim(WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort);
+        else if (is_power_of_two(num_elements_to_sort))
             bitonic_sort_thread_block_direct<max_elements_to_sort, V>(
                 WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort
             );
@@ -997,6 +1047,8 @@ CUDA_CALLABLE_DEVICE void tile_sort(TileK& t, TileV& t2, int start, int length)
             bitonic_sort_thread_block_shared_mem<max_elements_to_sort, V>(
                 WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort
             );
+    } else if constexpr (!tile_sort_block_has_whole_warps) {
+        bitonic_sort_thread_block_any_dim(WP_TILE_THREAD_IDX, keys, values, num_elements_to_sort);
     } else {
         if constexpr (max_elements_to_sort > BITONIC_SORT_THRESHOLD) {
             __shared__ T keys_tmp[max_elements_to_sort];
@@ -1306,14 +1358,15 @@ template <typename TileK, typename TileV> void tile_sort(TileK& t, TileV& t2, in
 #endif  // !defined(__CUDA_ARCH__)
 
 
-template <typename TileK, typename TileV> inline void adj_tile_sort(TileK& t, TileV& t2, TileK& adj_t1, TileV& adj_t2)
+template <typename TileK, typename TileV>
+inline CUDA_CALLABLE void adj_tile_sort(TileK& t, TileV& t2, TileK& adj_t1, TileV& adj_t2)
 {
     // MISSINGADJOINT: track permutation indices in forward pass, apply inverse permutation to
     // adj outputs
 }
 
 template <typename TileK, typename TileV>
-inline void
+inline CUDA_CALLABLE void
 adj_tile_sort(TileK& t, TileV& t2, int start, int length, TileK& adj_t1, TileV& adj_t2, int adj_start, int adj_length)
 {
     // MISSINGADJOINT: track permutation indices in forward pass, apply inverse

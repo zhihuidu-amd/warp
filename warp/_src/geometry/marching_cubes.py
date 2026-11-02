@@ -499,21 +499,13 @@ class _DeprecatedArgumentDefault:
         return repr(self.value)
 
 
-_DEFAULT_ZERO = _DeprecatedArgumentDefault(0)
 _DEFAULT_NONE = _DeprecatedArgumentDefault(None)
 
 
-def _warn_deprecated_argument(call: str, argument: str, guidance: str) -> None:
+def _warn_deprecated_bound_attribute(attribute: str, replacement: str) -> None:
     log_warning(
-        f"{call} argument `{argument}` is deprecated and will be removed in Warp 1.19. {guidance}",
-        category=DeprecationWarning,
-        stacklevel=3,
-    )
-
-
-def _warn_deprecated_attribute(attribute: str, guidance: str) -> None:
-    log_warning(
-        f"IsoSurfaceMarchingCubes.{attribute} is deprecated and will be removed in Warp 1.19. {guidance}",
+        f"IsoSurfaceMarchingCubes.{attribute} is deprecated and will be removed in a future version of Warp. "
+        f"Use `{replacement}` instead.",
         category=DeprecationWarning,
         stacklevel=3,
     )
@@ -541,17 +533,12 @@ class IsoSurfaceMarchingCubes(IsoSurfaceBase):
         nx: Number of grid nodes in the x-direction.
         ny: Number of grid nodes in the y-direction.
         nz: Number of grid nodes in the z-direction.
-        max_verts: Deprecated since Warp 1.9 and scheduled for removal in
-          Warp 1.19. Output arrays are sized dynamically; remove this argument
-          from calls.
-        max_tris: Deprecated since Warp 1.9 and scheduled for removal in Warp
-          1.19. Output arrays are sized dynamically; remove this argument from
-          calls.
-        device: Deprecated since Warp 1.9 and scheduled for removal in Warp
-          1.19. The input field determines where extraction runs; remove this
-          argument from calls.
         lower: See the documentation in :meth:`~.extract`.
         upper: See the documentation in :meth:`~.extract`.
+        domain_bounds_lower_corner: Deprecated alias of ``lower`` retained for
+          compatibility with ``warp.MarchingCubes``.
+        domain_bounds_upper_corner: Deprecated alias of ``upper`` retained for
+          compatibility with ``warp.MarchingCubes``.
 
     Attributes:
         nx (int): The number of grid nodes in the x-direction.
@@ -606,38 +593,35 @@ class IsoSurfaceMarchingCubes(IsoSurfaceBase):
         nx: int,
         ny: int,
         nz: int,
-        max_verts: int = _DEFAULT_ZERO,
-        max_tris: int = _DEFAULT_ZERO,
-        device: wp.DeviceLike = _DEFAULT_NONE,
-        lower=None,
-        upper=None,
+        lower: wp.vec3 | tuple[float, float, float] | None = None,
+        upper: wp.vec3 | tuple[float, float, float] | None = None,
+        *,
+        domain_bounds_lower_corner: wp.vec3 | tuple[float, float, float] | None = _DEFAULT_NONE,
+        domain_bounds_upper_corner: wp.vec3 | tuple[float, float, float] | None = _DEFAULT_NONE,
     ):
-        if max_verts is _DEFAULT_ZERO:
-            max_verts = 0
-        else:
-            _warn_deprecated_argument(
-                "IsoSurfaceMarchingCubes()",
-                "max_verts",
-                "Output arrays are sized dynamically; remove this argument from calls.",
+        if domain_bounds_lower_corner is not _DEFAULT_NONE:
+            if lower is not None and domain_bounds_lower_corner is not None:
+                raise TypeError("Cannot specify both `lower` and `domain_bounds_lower_corner`.")
+            log_warning(
+                "IsoSurfaceMarchingCubes() argument `domain_bounds_lower_corner` is deprecated and will be removed "
+                "in a future version of Warp. Use `lower` instead.",
+                category=DeprecationWarning,
+                stacklevel=2,
             )
+            if domain_bounds_lower_corner is not None:
+                lower = domain_bounds_lower_corner
 
-        if max_tris is _DEFAULT_ZERO:
-            max_tris = 0
-        else:
-            _warn_deprecated_argument(
-                "IsoSurfaceMarchingCubes()",
-                "max_tris",
-                "Output arrays are sized dynamically; remove this argument from calls.",
+        if domain_bounds_upper_corner is not _DEFAULT_NONE:
+            if upper is not None and domain_bounds_upper_corner is not None:
+                raise TypeError("Cannot specify both `upper` and `domain_bounds_upper_corner`.")
+            log_warning(
+                "IsoSurfaceMarchingCubes() argument `domain_bounds_upper_corner` is deprecated and will be removed "
+                "in a future version of Warp. Use `upper` instead.",
+                category=DeprecationWarning,
+                stacklevel=2,
             )
-
-        if device is _DEFAULT_NONE:
-            device = None
-        else:
-            _warn_deprecated_argument(
-                "IsoSurfaceMarchingCubes()",
-                "device",
-                "The input field determines where extraction runs; remove this argument from calls.",
-            )
+            if domain_bounds_upper_corner is not None:
+                upper = domain_bounds_upper_corner
 
         super().__init__(
             nx,
@@ -647,133 +631,35 @@ class IsoSurfaceMarchingCubes(IsoSurfaceBase):
             upper=upper,
         )
 
-        # These are unused, but retained for backwards compatibility during the deprecation period.
-        self._max_verts = max_verts
-        self._max_tris = max_tris
-        self._id = 0
-        self._device = wp.get_device(device)
-        self._runtime = wp._src.context.runtime
+    @property
+    def domain_bounds_lower_corner(self):
+        """Deprecated alias of :attr:`lower`.
+
+        .. deprecated:: 1.18
+            Use :attr:`lower` instead.
+        """
+        _warn_deprecated_bound_attribute("domain_bounds_lower_corner", "lower")
+        return self.lower
+
+    @domain_bounds_lower_corner.setter
+    def domain_bounds_lower_corner(self, value):
+        _warn_deprecated_bound_attribute("domain_bounds_lower_corner", "lower")
+        self.lower = value
 
     @property
-    def max_verts(self):
-        """Deprecated compatibility value that is not used.
+    def domain_bounds_upper_corner(self):
+        """Deprecated alias of :attr:`upper`.
 
-        .. deprecated:: 1.9.0
-            Output arrays are sized dynamically. This attribute will be removed
-            in Warp 1.19.
+        .. deprecated:: 1.18
+            Use :attr:`upper` instead.
         """
-        _warn_deprecated_attribute("max_verts", "Output arrays are sized dynamically; remove this access.")
-        return self._max_verts
+        _warn_deprecated_bound_attribute("domain_bounds_upper_corner", "upper")
+        return self.upper
 
-    @max_verts.setter
-    def max_verts(self, value):
-        _warn_deprecated_attribute("max_verts", "Output arrays are sized dynamically; remove this access.")
-        self._max_verts = value
-
-    @property
-    def max_tris(self):
-        """Deprecated compatibility value that is not used.
-
-        .. deprecated:: 1.9.0
-            Output arrays are sized dynamically. This attribute will be removed
-            in Warp 1.19.
-        """
-        _warn_deprecated_attribute("max_tris", "Output arrays are sized dynamically; remove this access.")
-        return self._max_tris
-
-    @max_tris.setter
-    def max_tris(self, value):
-        _warn_deprecated_attribute("max_tris", "Output arrays are sized dynamically; remove this access.")
-        self._max_tris = value
-
-    @property
-    def device(self):
-        """Deprecated device value that is not used for extraction.
-
-        .. deprecated:: 1.9.0
-            Use the input field's :attr:`warp.array.device` instead. This
-            attribute will be removed in Warp 1.19.
-        """
-        _warn_deprecated_attribute("device", "Use the input field's `device` attribute instead.")
-        return self._device
-
-    @device.setter
-    def device(self, value):
-        _warn_deprecated_attribute("device", "Use the input field's `device` attribute instead.")
-        self._device = value
-
-    @property
-    def id(self):
-        """Deprecated compatibility value that does not identify a resource.
-
-        .. deprecated:: 1.15.0
-            This attribute has no replacement and will be removed in Warp 1.19.
-        """
-        _warn_deprecated_attribute("id", "This value no longer identifies a native resource; remove this access.")
-        return self._id
-
-    @id.setter
-    def id(self, value):
-        _warn_deprecated_attribute("id", "This value no longer identifies a native resource; remove this access.")
-        self._id = value
-
-    @property
-    def runtime(self):
-        """Deprecated compatibility reference that is not used.
-
-        .. deprecated:: 1.15.0
-            Use public Warp APIs instead. This attribute will be removed in Warp
-            1.19.
-        """
-        _warn_deprecated_attribute("runtime", "Use public Warp APIs instead of accessing the runtime directly.")
-        return self._runtime
-
-    @runtime.setter
-    def runtime(self, value):
-        _warn_deprecated_attribute("runtime", "Use public Warp APIs instead of accessing the runtime directly.")
-        self._runtime = value
-
-    def resize(
-        self,
-        nx: int,
-        ny: int,
-        nz: int,
-        max_verts: int = _DEFAULT_ZERO,
-        max_tris: int = _DEFAULT_ZERO,
-    ) -> None:
-        """Update the grid dimensions for the context.
-
-        This allows the instance to be reused for scalar fields of a different
-        resolution. The new dimensions take effect on the next call to
-        :meth:`~.surface`.
-
-        Args:
-          nx: New number of nodes in the x-direction.
-          ny: New number of nodes in the y-direction.
-          nz: New number of nodes in the z-direction.
-          max_verts: Deprecated since Warp 1.9 and scheduled for removal in
-            Warp 1.19. Output arrays are sized dynamically; remove this
-            argument from calls.
-          max_tris: Deprecated since Warp 1.9 and scheduled for removal in Warp
-            1.19. Output arrays are sized dynamically; remove this argument
-            from calls.
-        """
-        if max_verts is not _DEFAULT_ZERO:
-            _warn_deprecated_argument(
-                "IsoSurfaceMarchingCubes.resize()",
-                "max_verts",
-                "Output arrays are sized dynamically; remove this argument from calls.",
-            )
-            self._max_verts = max_verts
-        if max_tris is not _DEFAULT_ZERO:
-            _warn_deprecated_argument(
-                "IsoSurfaceMarchingCubes.resize()",
-                "max_tris",
-                "Output arrays are sized dynamically; remove this argument from calls.",
-            )
-            self._max_tris = max_tris
-
-        super().resize(nx, ny, nz)
+    @domain_bounds_upper_corner.setter
+    def domain_bounds_upper_corner(self, value):
+        _warn_deprecated_bound_attribute("domain_bounds_upper_corner", "upper")
+        self.upper = value
 
     def surface(self, field: wp.array3d[float], threshold: float) -> None:
         """Compute a 2D surface mesh of a given isosurface from a 3D scalar field.

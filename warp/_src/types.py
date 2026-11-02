@@ -11,7 +11,6 @@ import inspect
 import math
 import operator
 import struct
-import sys
 import types
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -261,6 +260,9 @@ class int_base(scalar_base):
 class bool:
     """Boolean scalar type for use in Warp kernels and arrays."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.bool_]] = np.dtype(np.bool_)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_bool
 
@@ -286,6 +288,9 @@ class bool:
 class float16(float_base):
     """16-bit half-precision floating-point scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.float16]] = np.dtype(np.float16)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_uint16
 
@@ -300,12 +305,18 @@ class bfloat16(float_base):
 class float32(float_base):
     """32-bit single-precision floating-point scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.float32]] = np.dtype(np.float32)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_float
 
 
 class float64(float_base):
     """64-bit double-precision floating-point scalar type."""
+
+    __numpy_dtype__: ClassVar[np.dtype[np.float64]] = np.dtype(np.float64)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
 
     _length_ = 1
     _type_ = ctypes.c_double
@@ -314,12 +325,18 @@ class float64(float_base):
 class int8(int_base):
     """8-bit signed integer scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.int8]] = np.dtype(np.int8)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_int8
 
 
 class uint8(int_base):
     """8-bit unsigned integer scalar type."""
+
+    __numpy_dtype__: ClassVar[np.dtype[np.uint8]] = np.dtype(np.uint8)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
 
     _length_ = 1
     _type_ = ctypes.c_uint8
@@ -328,12 +345,18 @@ class uint8(int_base):
 class int16(int_base):
     """16-bit signed integer scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.int16]] = np.dtype(np.int16)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_int16
 
 
 class uint16(int_base):
     """16-bit unsigned integer scalar type."""
+
+    __numpy_dtype__: ClassVar[np.dtype[np.uint16]] = np.dtype(np.uint16)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
 
     _length_ = 1
     _type_ = ctypes.c_uint16
@@ -342,12 +365,18 @@ class uint16(int_base):
 class int32(int_base):
     """32-bit signed integer scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.int32]] = np.dtype(np.int32)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_int32
 
 
 class uint32(int_base):
     """32-bit unsigned integer scalar type."""
+
+    __numpy_dtype__: ClassVar[np.dtype[np.uint32]] = np.dtype(np.uint32)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
 
     _length_ = 1
     _type_ = ctypes.c_uint32
@@ -356,6 +385,9 @@ class uint32(int_base):
 class int64(int_base):
     """64-bit signed integer scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.int64]] = np.dtype(np.int64)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_int64
 
@@ -363,15 +395,18 @@ class int64(int_base):
 class uint64(int_base):
     """64-bit unsigned integer scalar type."""
 
+    __numpy_dtype__: ClassVar[np.dtype[np.uint64]] = np.dtype(np.uint64)
+    """Equivalent NumPy dtype, recognized by NumPy 2.4 and later."""
+
     _length_ = 1
     _type_ = ctypes.c_uint64
 
 
 class handle(uint64):
-    """Type for object handles (Mesh, Volume, BVH) in kernel parameters.
+    """Type for object handles (Mesh, Volume, BVH) in kernel parameters, struct fields, and arrays.
 
     Behaves identically to ``uint64`` but allows APIC to detect which
-    parameters need pointer remapping during graph replay.
+    values need pointer remapping during graph replay.
     """
 
     _wp_native_name_ = "uint64"
@@ -389,9 +424,41 @@ native_scalar_types = (int32, float32, bool)
 
 # TypeVars with proper constraints now that scalar types are defined
 # Note: TypeVar constraints must be listed explicitly (Pyright doesn't support unpacking)
-# Keep these in sync with the tuples above when adding new scalar types
+# Keep these (and their docstrings) in sync with the tuples above when adding new scalar types
 Int = TypeVar("Int", int, int8, uint8, int16, uint16, int32, uint32, int64, uint64)
+"""Generic annotation for any Warp integer scalar type.
+
+Use ``Int`` to annotate parameters of generic Warp kernels and functions,
+either directly or as the ``dtype`` of a generic array, vector, or matrix.
+``Int`` matches the following integer types:
+
+- :class:`~warp.int8`, :class:`~warp.int16`, :class:`~warp.int32`, or :class:`~warp.int64`.
+- :class:`~warp.uint8`, :class:`~warp.uint16`, :class:`~warp.uint32`, or :class:`~warp.uint64`.
+- Python :class:`int`, which Warp treats as :class:`~warp.int32`.
+
+Use :data:`~warp.Scalar` to accept both integer and floating-point types.
+
+For more on writing generic kernels and functions with ``Int``, see
+:ref:`generic_type_annotations`.
+"""
+
 Float = TypeVar("Float", float, float16, bfloat16, float32, float64)
+"""Generic annotation for any Warp floating-point scalar type.
+
+Use ``Float`` to annotate parameters of generic Warp kernels and functions,
+either directly or as the ``dtype`` of a generic array, vector, or matrix.
+``Float`` matches the following floating-point types:
+
+- :class:`~warp.float16`, :class:`~warp.float32`, or :class:`~warp.float64`.
+- :class:`~warp.bfloat16`.
+- Python :class:`float`, which Warp treats as :class:`~warp.float32`.
+
+Use :data:`~warp.Scalar` to accept both integer and floating-point types.
+
+For more on writing generic kernels and functions with ``Float``, see
+:ref:`generic_type_annotations`.
+"""
+
 Scalar = TypeVar(
     "Scalar",
     int,
@@ -409,6 +476,24 @@ Scalar = TypeVar(
     float32,
     float64,
 )
+"""Generic annotation for any Warp integer or floating-point scalar type.
+
+Use ``Scalar`` to annotate parameters of generic Warp kernels and functions,
+either directly or as the ``dtype`` of a generic array, vector, or matrix.
+``Scalar`` matches the types that :data:`~warp.Int` and :data:`~warp.Float` match:
+
+- :class:`~warp.int8`, :class:`~warp.int16`, :class:`~warp.int32`, or :class:`~warp.int64`.
+- :class:`~warp.uint8`, :class:`~warp.uint16`, :class:`~warp.uint32`, or :class:`~warp.uint64`.
+- :class:`~warp.float16`, :class:`~warp.float32`, or :class:`~warp.float64`.
+- :class:`~warp.bfloat16`.
+- Python :class:`int` or :class:`float`, which Warp treats as :class:`~warp.int32`
+  or :class:`~warp.float32`, respectively.
+
+:class:`~warp.bool` doesn't match ``Scalar``.
+
+For more on writing generic kernels and functions with ``Scalar``, see
+:ref:`generic_type_annotations`.
+"""
 
 
 def _unwrap_literal(value):
@@ -864,6 +949,10 @@ def vector(length, dtype):
     elif dtype is builtins.bool:
         dtype = bool
 
+    # A component name is one of the first `length` letters of "xyzw", the same
+    # names `Adjoint.vector_component_index` accepts inside a kernel.
+    component_indices = {} if length is Any else {c: i for i, c in enumerate("xyzw"[:length])}
+
     class vec_t(ctypes.Array):
         # ctypes.Array data for length, shape and c type:
         _length_ = 0 if length is Any else length
@@ -1010,16 +1099,22 @@ def vector(length, dtype):
                 raise KeyError(f"Invalid key {key}, expected int or slice")
 
         def __getattr__(self, name):
-            idx = "xyzw".find(name)
-            if idx != -1:
+            idx = component_indices.get(name)
+            if idx is not None:
                 return self.__getitem__(idx)
 
             return self.__getattribute__(name)
 
         def __setattr__(self, name, value):
-            idx = "xyzw".find(name)
-            if idx != -1:
+            idx = component_indices.get(name)
+            if idx is not None:
                 return self.__setitem__(idx, value)
+
+            # A name spelled entirely from component letters asks for a
+            # component, so storing it as an attribute would shadow the vector
+            # without touching it. Names outside that alphabet stay assignable.
+            if name and not name.strip("xyzw"):
+                raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
             return super().__setattr__(name, value)
 
@@ -1258,6 +1353,18 @@ def matrix(shape, dtype):
             return True
 
         def get_row(self, r):
+            """Return row ``r`` of the matrix as a new vector.
+
+            Args:
+                r: Zero-based row index in the range ``-rows <= r < rows``, where ``rows`` is the number of matrix rows.
+                    Negative values count from the end, so ``-1`` is the last row.
+
+            Returns:
+                A vector with one component per matrix column and the matrix's scalar type.
+
+            Raises:
+                IndexError: If ``r`` is out of range.
+            """
             if r < -self._shape_[0] or r >= self._shape_[0]:
                 raise IndexError("Invalid row index")
             if r < 0:
@@ -1271,6 +1378,18 @@ def matrix(shape, dtype):
                 return self._wp_row_type_(row_data)
 
         def get_col(self, c):
+            """Return column ``c`` of the matrix as a new vector.
+
+            Args:
+                c: Zero-based column index in the range ``-cols <= c < cols``, where ``cols`` is the number of matrix
+                    columns. Negative values count from the end, so ``-1`` is the last column.
+
+            Returns:
+                A vector with one component per matrix row and the matrix's scalar type.
+
+            Raises:
+                IndexError: If ``c`` is out of range.
+            """
             if c < -self._shape_[1] or c >= self._shape_[1]:
                 raise IndexError("Invalid column index")
             if c < 0:
@@ -1285,6 +1404,18 @@ def matrix(shape, dtype):
                 return self._wp_col_type_(col_data)
 
         def set_row(self, r, v):
+            """Set row ``r`` of the matrix to ``v`` in place.
+
+            Args:
+                r: Zero-based row index in the range ``-rows <= r < rows``, where ``rows`` is the number of matrix rows.
+                    Negative values count from the end, so ``-1`` is the last row.
+                v: Scalar to assign to every element of the row, or a sequence with one value per matrix column,
+                    such as a vector, list, or tuple. Values must be compatible with the matrix's scalar type.
+                    Currently, integer matrices require integer values.
+
+            Raises:
+                IndexError: If ``r`` is out of range.
+            """
             if r < -self._shape_[0] or r >= self._shape_[0]:
                 raise IndexError("Invalid row index")
             if r < 0:
@@ -1321,6 +1452,18 @@ def matrix(shape, dtype):
             super().__setitem__(slice(row_start, row_end), v)
 
         def set_col(self, c, v):
+            """Set column ``c`` of the matrix to ``v`` in place.
+
+            Args:
+                c: Zero-based column index in the range ``-cols <= c < cols``, where ``cols`` is the number of matrix
+                    columns. Negative values count from the end, so ``-1`` is the last column.
+                v: Scalar to assign to every element of the column, or a sequence with one value per matrix row,
+                    such as a vector, list, or tuple. Values must be compatible with the matrix's scalar type.
+                    Currently, integer matrices require integer values.
+
+            Raises:
+                IndexError: If ``c`` is out of range.
+            """
             if c < -self._shape_[1] or c >= self._shape_[1]:
                 raise IndexError("Invalid col index")
             if c < 0:
@@ -2116,6 +2259,7 @@ warp_type_to_np_dtype = {
     uint16: np.uint16,
     uint32: np.uint32,
     uint64: np.uint64,
+    handle: np.uint64,
     float16: np.float16,
     bfloat16: np.uint16,  # TODO: Use ml_dtypes.bfloat16 when available (see also _np_float32_to_bfloat16_bits)
     float32: np.float32,
@@ -2697,7 +2841,8 @@ def type_repr(t) -> str:
     if t is Any:
         return "Any"
     if is_array(t):
-        cls_name = concrete_array_type(t).__name__
+        # Diagnostics describe the Python object, while compiler types use its native family.
+        cls_name = t._concrete_cls.__name__ if isinstance(t, _ArrayAnnotationBase) else type(t).__name__
         if isinstance(t, _ArrayAnnotationBase) or (hasattr(t, "device") and t.device is None):
             # array is used as a type annotation - display ndim instead of shape
             ndim_repr = "Any" if t.ndim is Any else t.ndim
@@ -2893,10 +3038,13 @@ def matches_array_class(t, cls) -> builtins.bool:
 
 
 def concrete_array_type(t) -> type:
-    """Return the concrete array class for an annotation or instance."""
-    if isinstance(t, _ArrayAnnotationBase):
+    """Return an array's native family, preserving ``type(t)`` for non-arrays."""
+    cls = type(t)
+    if issubclass(cls, _ArrayAnnotationBase):
         return t._concrete_cls
-    return type(t)
+    if id(cls) in _ARRAY_FAMILY_IDS:
+        return cls
+    return _resolve_array_family(t) or cls
 
 
 def is_tuple(x) -> builtins.bool:
@@ -3975,6 +4123,22 @@ class array(Array[DType, NDim]):
             pass
 
     @property
+    def __array__(self):
+        # raising an AttributeError here makes hasattr() return False, so CPU arrays keep converting through
+        # __array_interface__
+        if self.device is not None and self.device.is_cpu:
+            raise AttributeError(f"__array__ not supported because device is {self.device}")
+
+        # NumPy calls the value returned by this property, so return a function that raises the error
+        def reject(dtype=None, copy=None):
+            raise TypeError(
+                f"Warp does not support implicit NumPy conversion for arrays on device {self.device}. "
+                "Call array.numpy() explicitly to obtain a NumPy array."
+            )
+
+        return reject
+
+    @property
     def __array_interface__(self):
         # raising an AttributeError here makes hasattr() return False
         if self.device is None or not self.device.is_cpu:
@@ -4257,6 +4421,12 @@ class array(Array[DType, NDim]):
 
     @property
     def grad(self):
+        """Array that accumulates gradients for this array during the backward pass, or ``None``.
+
+        Assigning an array also sets :attr:`requires_grad` to ``True``. The assigned array must have the same
+        dtype, shape, strides, and device as this array. Assigning ``None`` removes the gradient array and sets
+        :attr:`requires_grad` to ``False``.
+        """
         return self._grad
 
     @grad.setter
@@ -4292,6 +4462,12 @@ class array(Array[DType, NDim]):
 
     @property
     def requires_grad(self):
+        """Whether gradients are tracked for this array.
+
+        Setting this to ``True`` allocates a zero-initialized :attr:`grad` array if none exists. Setting it to
+        ``False`` removes :attr:`grad` and sets :attr:`retain_grad` to ``False``. See :class:`warp.Tape` for how
+        gradients are recorded and propagated.
+        """
         return self._requires_grad
 
     @requires_grad.setter
@@ -4311,6 +4487,16 @@ class array(Array[DType, NDim]):
 
     @property
     def retain_grad(self):
+        """Whether the backward pass preserves this array's gradient instead of zeroing it.
+
+        By default, the backward pass zeroes an element's gradient after propagating it through a write to that
+        element, so only the final forward-pass write to each element receives the gradient. Set this to ``True``
+        to keep the gradient of an intermediate or output array for inspection after the backward pass. Only do so
+        when each element is written at most once during the forward pass; otherwise, gradients are double-counted.
+
+        Raises:
+            ValueError: If ``retain_grad`` is set to ``True`` while :attr:`requires_grad` is ``False``.
+        """
         return self._retain_grad
 
     @retain_grad.setter
@@ -5579,6 +5765,103 @@ _ARRAY_ANNOTATION_MAP = {
     indexedfabricarray: _IndexedFabricArrayAnnotation,
 }
 
+# Registered classes are retained by array_types. Compare identities without invoking
+# application metaclass hashing or equality; this is not a cache of user classes.
+_ARRAY_FAMILY_IDS = frozenset(id(cls) for cls in array_types)
+_ARRAY_CTYPE_MAP = {
+    array: array_t,
+    indexedarray: indexedarray_t,
+    fabricarray: fabricarray_t,
+    indexedfabricarray: indexedfabricarray_t,
+}
+
+
+def _resolve_array_family(value) -> type | None:
+    """Resolve a real array ancestor without consulting a spoofable ``__class__``.
+
+    Unrelated native families cannot share a descriptor layout. Mixins and diamonds
+    within one family are valid; ``fixedarray`` keeps its separate compiler type.
+    Lightweight annotations describe arrays but have no native array ancestor,
+    so they resolve to ``None``.
+    """
+    cls = type(value)
+    if id(cls) in _ARRAY_FAMILY_IDS:
+        return cls
+
+    # Most inputs are regular arrays or unrelated objects, requiring no MRO scan.
+    if not issubclass(cls, (indexedarray, fabricarray, indexedfabricarray, fixedarray, _ArrayAnnotationBase)):
+        return array if issubclass(cls, array) else None
+
+    candidates = [ancestor for ancestor in cls.__mro__ if id(ancestor) in _ARRAY_FAMILY_IDS]
+    if len(candidates) > 1:
+        candidates = [
+            candidate
+            for candidate in candidates
+            if not any(candidate is not other and candidate in other.__mro__ for other in candidates)
+        ]
+        if len(candidates) > 1:
+            names = ", ".join(f"wp.{candidate.__name__}" for candidate in candidates)
+            raise TypeError(
+                f"Array subclass '{cls.__qualname__}' derives from unrelated Warp array families ({names}); "
+                "exactly one native array family is required"
+            )
+    return candidates[0] if candidates else None
+
+
+def _normalize_array_argument_type(value):
+    """Describe host array values with storage-free native annotations."""
+    cls = type(value)
+    if cls is type or cls is int or cls is float or cls is builtins.bool or issubclass(cls, _ArrayAnnotationBase):
+        return value
+    family = _resolve_array_family(value)
+    if family is fixedarray:
+        raise TypeError(
+            "Cannot use wp.fixedarray as a host argument or kernel overload type; it is a compiler-only stack array"
+        )
+    annotation_cls = _ARRAY_ANNOTATION_MAP.get(family)
+    if annotation_cls is None:
+        return value
+    return annotation_cls(value.dtype, value.ndim)
+
+
+def _validate_array_subclass_descriptor(value, descriptor, expected_family, ndim):
+    """Validate a subclass descriptor's layout before passing it to native code.
+
+    This checks representation, not pointer validity or allocation ownership.
+    Exact built-in arrays retain their existing trusted descriptor path.
+    """
+    if type(value) is expected_family:
+        return descriptor
+    descriptor_cls = _ARRAY_CTYPE_MAP[expected_family]
+    if not issubclass(type(descriptor), descriptor_cls):
+        raise TypeError(
+            f"Array subclass '{type(value).__qualname__}' must return {descriptor_cls.__name__} from __ctype__(), "
+            f"got {type(descriptor).__name__}"
+        )
+    if ctypes.sizeof(descriptor) != ctypes.sizeof(descriptor_cls):
+        raise TypeError(
+            f"Array subclass '{type(value).__qualname__}' returned an incompatible {descriptor_cls.__name__} size"
+        )
+    if type(descriptor) is not descriptor_cls:
+        # Use native fields rather than potentially overridden Python properties,
+        # and keep CPU launch cache keys independent of application descriptor classes.
+        original_descriptor = descriptor
+        descriptor = descriptor_cls.from_buffer_copy(descriptor)
+        descriptor._ref = original_descriptor
+    if expected_family is array:
+        descriptor_ndim = descriptor.ndim
+    elif expected_family is indexedarray:
+        descriptor_ndim = descriptor.data.ndim
+    else:
+        return descriptor
+    expected_ndim = value.ndim if ndim is Any else ndim
+    if descriptor_ndim != expected_ndim:
+        raise ValueError(
+            f"Array subclass '{type(value).__qualname__}' returned a descriptor with {descriptor_ndim} dimension(s), "
+            f"expected {expected_ndim}"
+        )
+    return descriptor
+
 
 def _parse_array_subscript(cls, params):
     """Parse subscript parameters for array-like types.
@@ -5607,13 +5890,14 @@ def _parse_array_subscript(cls, params):
 
 
 def array_type_id(a):
-    if matches_array_class(a, array):
+    family = concrete_array_type(a)
+    if family is array or family is fixedarray:
         return ARRAY_TYPE_REGULAR
-    elif matches_array_class(a, indexedarray):
+    elif family is indexedarray:
         return ARRAY_TYPE_INDEXED
-    elif matches_array_class(a, fabricarray):
+    elif family is fabricarray:
         return ARRAY_TYPE_FABRIC
-    elif matches_array_class(a, indexedfabricarray):
+    elif family is indexedfabricarray:
         return ARRAY_TYPE_FABRIC_INDEXED
     else:
         raise ValueError("Invalid array type")
@@ -5909,6 +6193,11 @@ class Bvh:
             The grouped BVH thus allows Warp to perform environment-specific queries—such as collision detection,
             sensor simulation, or rendering—within a unified BVH framework, maintaining compatibility with existing APIs
             and near-identical performance for non-grouped use cases.
+
+        Note:
+            For grouped BVHs built with ``"sah"`` or ``"median"``, the traversal depth limit applies separately
+            to each group subtree. Start queries at the desired group's root to stay within this limit.
+            Traversal from the global root is not guaranteed to fit the query stack for deep grouped trees.
         """
         if len(lowers) != len(uppers):
             raise RuntimeError("The same number of lower and upper bounds must be provided")
@@ -8254,13 +8543,26 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
         arg = args[i]
         arg_type = type(arg)
         arg_name = arg_names[i] if arg_names else str(i)
-        if arg_type in array_types:
-            arg_types.append(arg_type(dtype=arg.dtype, ndim=arg.ndim))
+        if arg_type is int or arg_type is float or arg_type is builtins.bool:
+            arg_types.append(type_to_warp(arg_type))
+            continue
+        try:
+            family = None if issubclass(arg_type, _ArrayAnnotationBase) else _resolve_array_family(arg)
+        except TypeError as error:
+            raise TypeError(f"Unable to infer the type of argument '{arg_name}': {error}") from error
+        if family is not None:
+            annotation_cls = _ARRAY_ANNOTATION_MAP.get(family)
+            if annotation_cls is not None:
+                arg_types.append(annotation_cls(arg.dtype, arg.ndim))
+            else:
+                # A fixedarray has the type code of a regular array but a different native layout.
+                # Reject host values before they can register a colliding specialization.
+                raise TypeError(
+                    f"Unable to infer the type of argument '{arg_name}', got a wp.fixedarray, "
+                    "a compiler-only type for stack arrays inside kernels"
+                )
         elif arg_type in scalar_and_bool_types:
             arg_types.append(arg_type)
-        elif arg_type in (int, float, builtins.bool):
-            # canonicalize type
-            arg_types.append(type_to_warp(arg_type))
         elif hasattr(arg_type, "_wp_scalar_type_"):
             # vector/matrix type
             arg_types.append(arg_type)
@@ -8273,7 +8575,12 @@ def infer_argument_types(args: list[Any], template_types, arg_names: list[str] |
             # allow passing None for arrays
             t = template_types[i]
             if is_array(t):
-                arg_types.append(type(t)(dtype=t.dtype, ndim=t.ndim))
+                family = concrete_array_type(t)
+                annotation_cls = _ARRAY_ANNOTATION_MAP.get(family)
+                if annotation_cls is not None:
+                    arg_types.append(annotation_cls(t.dtype, t.ndim))
+                else:
+                    arg_types.append(family(dtype=t.dtype, shape=t.shape))
             else:
                 raise TypeError(f"Unable to infer the type of argument '{arg_name}', got None")
         else:
@@ -8343,20 +8650,9 @@ def is_builtin_callable_annotation(annotation) -> bool:
 def get_type_code(arg_type) -> str:
     if arg_type is Any:
         # special case for generics
-        # note: since Python 3.11 Any is a type, so we check for it first
         return "?"
     elif is_warp_function_annotation(arg_type):
         return "c"
-    elif (
-        sys.version_info < (3, 11)
-        and hasattr(types, "GenericAlias")
-        and isinstance(arg_type, types.GenericAlias)
-        and arg_type.__origin__ is tuple
-    ):
-        # Handle tuple[...] on Python <= 3.10 where it creates types.GenericAlias
-        # This must come before isinstance(arg_type, type) check
-        arg_types = arg_type.__args__
-        return f"tpl{len(arg_types)}{''.join(get_type_code(x) for x in arg_types)}"
     elif get_origin(arg_type) is Union or isinstance(arg_type, types.UnionType):
         raise TypeError(
             "Union type annotations are only supported at Python scope and are invalid in Warp kernels/functions"

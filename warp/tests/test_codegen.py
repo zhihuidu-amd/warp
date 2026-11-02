@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import copy
 import functools
 import gc
 import importlib
@@ -387,6 +388,19 @@ def test_range_constant():
 
     # sum [-3, 3)
     wp.expect_eq(s, -3)
+
+
+@wp.kernel
+def test_range_constant_empty():
+    count = int(0)
+
+    for _i in range(100, 2, 1):
+        count += 1
+
+    for _i in range(2, 100, -1):
+        count += 1
+
+    wp.expect_eq(count, 0)
 
 
 N = wp.constant(3)
@@ -1924,6 +1938,18 @@ def test_unary_minus_on_64bit_constant(test, device):
     np.testing.assert_array_equal(out_i64.numpy(), [-7 * 2])
 
 
+@wp.kernel(module="unique")
+def _non_ascii_source_kernel(out: wp.array[int]):
+    out[0] = 1  # Copied into the generated source: λ → ═
+
+
+def test_non_ascii_source(test, device):
+    # The generated source must be written as UTF-8 regardless of the locale encoding.
+    out = wp.zeros(1, dtype=int, device=device)
+    wp.launch(_non_ascii_source_kernel, dim=1, inputs=[out], device=device)
+    np.testing.assert_array_equal(out.numpy(), [1])
+
+
 class TestCodeGen(unittest.TestCase):
     def _codegen_cuda_source(self, kernel):
         module = kernel.module
@@ -1946,6 +1972,54 @@ class TestCodeGen(unittest.TestCase):
         builder = wp._src.context.ModuleBuilder(module, options=options, hasher=hasher)
         builder.codegen("cuda")
         return builder.build_meta()
+
+    def test_max_unroll_uses_range_trip_count(self):
+        """Verify ``max_unroll`` is compared against the exact trip count of constant ``range()`` loops."""
+
+        @wp.kernel(module="unique", module_options={"max_unroll": 4})
+        def dividing_ranges():
+            for _i in range(0, 8, 2):
+                pass
+            for _i in range(8, 0, -2):
+                pass
+
+        @wp.kernel(module="unique", module_options={"max_unroll": 4})
+        def nondividing_ranges():
+            for _i in range(0, 9, 2):
+                pass
+            for _i in range(8, -1, -2):
+                pass
+
+        @wp.kernel(module="unique", module_options={"max_unroll": 4})
+        def empty_ranges():
+            for _i in range(9, 0, 1):
+                pass
+            for _i in range(0, 9, -1):
+                pass
+
+        def count_dynamic_loops(kernel):
+            self._codegen_cpu_source(kernel)
+            return len([line for line in kernel.adj.blocks[0].body_forward if line.lstrip().startswith("start_for_")])
+
+        self.assertEqual(count_dynamic_loops(dividing_ranges), 0)
+        self.assertEqual(count_dynamic_loops(nondividing_ranges), 2)
+        self.assertEqual(count_dynamic_loops(empty_ranges), 0)
+
+    def test_empty_constant_loop_does_not_hide_outer_mutation(self):
+        """Verify an empty constant loop does not hide a constant mutated in an enclosing dynamic loop."""
+
+        @wp.kernel(module="unique")
+        def shadowed_by_empty_loop(n: int, out: wp.array[float]):
+            i = 5
+            for _j in range(n):
+                # the range is empty, so this loop never rebinds ``i``
+                for i in range(20, 0):
+                    out[0] = float(i)
+                i = i + 1
+            out[0] = float(i)
+
+        with self.assertRaisesRegex(wp.WarpCodegenError, r"Error mutating a constant i inside a dynamic loop"):
+            self._codegen_cpu_source(shadowed_by_empty_loop)
 
     def test_module_enable_backward_controls_function_adjoint_codegen(self):
         """Verify called-function adjoint codegen follows the effective ``enable_backward`` setting."""
@@ -2119,10 +2193,8 @@ class TestCodeGen(unittest.TestCase):
         """Verify ``get_arg_type`` returns ``Any`` for generic parameters.
 
         ``Any`` marks an unspecialized generic parameter and must be returned
-        as-is, both when passed directly and when carried on a ``Var``. Before
-        Python 3.11 ``Any`` is a ``typing._SpecialForm`` instance rather than a
-        ``type``, so a regressed implementation falls through to ``type(arg)``
-        and yields ``typing._SpecialForm``, which has no type code.
+        as-is, both when passed directly and when carried on a ``Var``, so
+        downstream signature logic can treat it as generic.
         """
         self.assertIs(codegen.get_arg_type(Any), Any)
         self.assertIs(codegen.get_arg_type(codegen.Var("coords", Any)), Any)
@@ -2556,12 +2628,12 @@ class TestCodeGen(unittest.TestCase):
             def invalid_kernel():
                 return
 
-    def test_replace_static_expressions_replaces_call_in_ast(self):
-        """Replace resolvable ``wp.static`` calls in the abstract syntax tree.
+    def test_replace_static_expressions_substitutes_calls_in_view(self):
+        """Substitute resolvable ``wp.static`` calls into a per-adjoint view of the tree.
 
-        The walker mutates ``adj.tree`` by replacing each resolvable call with an
-        ``ast.Constant`` or, for a function result, an ``ast.Name``. This pins the
-        deferred-replacement application step.
+        Each call becomes an ``ast.Constant`` or, for a function result, an
+        ``ast.Name`` in ``adj.tree``, while the shared tree keeps the calls so
+        redeclarations resolve their own values from it.
         """
         _value_a = 7
         _value_b = 13
@@ -2571,20 +2643,63 @@ class TestCodeGen(unittest.TestCase):
             out[i] = wp.static(_value_a)
             out[i] += wp.static(_value_b)
 
+        def find_static_calls(tree):
+            return [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "static"
+            ]
+
         adj = codegen.Adjoint(_kernel_with_two_statics)
 
-        # No wp.static Calls should remain in the tree after replacement.
-        remaining_static_calls = [
-            node
-            for node in ast.walk(adj.tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "static"
-        ]
-        self.assertEqual(remaining_static_calls, [])
+        # No wp.static Calls should remain in the adjoint's tree after replacement.
+        self.assertEqual(find_static_calls(adj.tree), [])
 
         # Both constants should appear as ast.Constant nodes in the tree.
         constants = {node.value for node in ast.walk(adj.tree) if isinstance(node, ast.Constant)}
         self.assertIn(_value_a, constants)
         self.assertIn(_value_b, constants)
+
+        # The shared pristine tree is untouched and still holds the calls.
+        shared = codegen._shared_source_for_code(_kernel_with_two_statics.__code__)
+        self.assertIsNot(adj.tree, shared.tree)
+        self.assertEqual(len(find_static_calls(shared.tree)), 2)
+
+        # Only the paths to replaced calls are copied; untouched statements are aliased.
+        self.assertIs(adj.tree.body[0].body[0], shared.tree.body[0].body[0])  # i = wp.tid()
+        self.assertIsNot(adj.tree.body[0].body[1], shared.tree.body[0].body[1])
+
+        # The view no longer matches the shared tree's derived caches.
+        self.assertIsNone(adj._shared_source)
+
+    def test_substitute_nodes_one_frame_per_level(self):
+        """Copy a deep path to a replacement with one stack frame per tree level."""
+        depth = 2000
+        leaf = ast.Name("x", ast.Load())
+        root = leaf
+        ancestors = set()
+        for _ in range(depth):
+            root = ast.Call(func=ast.Name("f", ast.Load()), args=[root], keywords=[])
+            ancestors.add(root)
+
+        stack_depth = 0
+        frame = sys._getframe()
+        while frame is not None:
+            stack_depth += 1
+            frame = frame.f_back
+        limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(stack_depth + depth + 100)
+        try:
+            view = codegen._substitute_nodes(root, {leaf: ast.Constant(1)}, ancestors)
+        finally:
+            sys.setrecursionlimit(limit)
+
+        original = root
+        for _ in range(depth):
+            self.assertIsNot(view, original)
+            view, original = view.args[0], original.args[0]
+        self.assertEqual(view.value, 1)
+        self.assertIs(original, leaf)
 
     def test_replace_static_expressions_defers_loop_var_reference(self):
         """Defer ``wp.static`` calls that reference a loop variable.
@@ -2716,6 +2831,51 @@ class TestCodeGen(unittest.TestCase):
         gc.collect()
         self.assertNotIn(dead_id, codegen._shared_function_sources)
 
+    def test_overload_matching_positional_arguments(self):
+        """Accept and reject positional argument types for every builtin overload as Python's call binding does."""
+
+        def outcome(func, arg_types, allow_erasure):
+            try:
+                return codegen.func_match_args(func, arg_types, {}, allow_erasure=allow_erasure)
+            except Exception as e:
+                return type(e), str(e)
+
+        overloads = [
+            f for func in wp._src.context.builtin_functions.values() for f in getattr(func, "overloads", (func,))
+        ]
+        for i, func in enumerate(overloads):
+            own = tuple(func.input_types.values())
+            other = tuple(overloads[i - 1].input_types.values())
+            for arg_types in {*(own[:n] for n in range(len(own) + 1)), (*own, float), other}:
+                for allow_erasure in (False, True):
+                    with self.subTest(func=func.key, arg_types=arg_types, allow_erasure=allow_erasure):
+                        # a list takes the Signature.bind() path
+                        self.assertEqual(
+                            outcome(func, arg_types, allow_erasure), outcome(func, list(arg_types), allow_erasure)
+                        )
+
+    def test_overload_matching_rejects_argument_given_twice(self):
+        """Reject a call that passes the same parameter positionally and by keyword."""
+
+        @wp.func
+        def plain(a: float):
+            return a
+
+        self.assertTrue(codegen.func_match_args(plain, (float,), {}))
+        self.assertFalse(codegen.func_match_args(plain, (float,), {"a": float}))
+
+    def test_overload_matching_follows_replaced_signature(self):
+        """Match against a function's signature after it has been replaced, not the one matched first."""
+
+        @wp.func
+        def plain(a: float):
+            return a
+
+        self.assertTrue(codegen.func_match_args(plain, (float,), {}))
+        plain = copy.copy(plain)
+        plain.signature = inspect.Signature([inspect.Parameter("a", inspect.Parameter.KEYWORD_ONLY, annotation=float)])
+        self.assertFalse(codegen.func_match_args(plain, (float,), {}))
+
 
 devices = get_test_devices()
 
@@ -2793,6 +2953,7 @@ add_kernel_test(
     devices=devices,
 )
 add_kernel_test(TestCodeGen, name="test_range_constant", kernel=test_range_constant, dim=1, devices=devices)
+add_kernel_test(TestCodeGen, name="test_range_constant_empty", kernel=test_range_constant_empty, dim=1, devices=devices)
 add_kernel_test(
     TestCodeGen,
     name="test_range_constant_dynamic_nested",
@@ -3014,6 +3175,7 @@ add_function_test(
     test_unary_minus_on_64bit_constant,
     devices=devices,
 )
+add_function_test(TestCodeGen, "test_non_ascii_source", test_non_ascii_source, devices=devices)
 
 
 if __name__ == "__main__":

@@ -1,19 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import inspect
 import math
 import subprocess
 import sys
 import tempfile
 import unittest
+import weakref
 from pathlib import Path
-from typing import Any
-
-try:
-    from typing import get_overloads
-except ImportError:
-    get_overloads = None
+from typing import Any, get_overloads
 
 import numpy as np
 
@@ -379,6 +376,42 @@ def test_grad_in_func_grad(test, device):
 
 
 class TestFunc(unittest.TestCase):
+    def test_func_decorator_does_not_retain_caller(self):
+        """Release unrelated caller objects without relying on cyclic collection."""
+
+        class CallerState:
+            pass
+
+        def register_function(parameterized):
+            if parameterized:
+
+                @wp.func()
+                def identity(x: float) -> float:
+                    return x
+            else:
+
+                @wp.func
+                def identity(x: float) -> float:
+                    return x
+
+            return identity
+
+        def discard_caller_state(parameterized):
+            caller_state = CallerState()
+            register_function(parameterized)
+            return weakref.ref(caller_state)
+
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for parameterized in (False, True):
+                with self.subTest(parameterized=parameterized):
+                    caller_state_ref = discard_caller_state(parameterized)
+                    self.assertIsNone(caller_state_ref())
+        finally:
+            if gc_enabled:
+                gc.enable()
+
     def test_user_func_export(self):
         """Call overloaded user-defined functions from Python."""
         i = custom(1)
@@ -569,7 +602,6 @@ class TestFunc(unittest.TestCase):
         length = get_array_len(arr)
         assert length == 8
 
-    @unittest.skipUnless(sys.version_info >= (3, 11), "get_overloads() is only available in Python 3.11 and later")
     def test_func_decorator_has_overloads(self):
         """Verify @wp.func has @overload signatures for static type checkers.
 
@@ -588,7 +620,6 @@ class TestFunc(unittest.TestCase):
             "Without these, static type checkers cannot infer decorated function signatures.",
         )
 
-    @unittest.skipUnless(sys.version_info >= (3, 11), "get_overloads() is only available in Python 3.11 and later")
     def test_func_decorator_overloads_preserve_signature(self):
         """Verify @wp.func overloads return Callable types to preserve signatures."""
         overloads = get_overloads(wp.func)

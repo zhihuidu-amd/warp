@@ -12,6 +12,7 @@ from warp._src.fem.cache import cached_vec_type
 from warp._src.fem.geometry import Grid3D
 from warp._src.fem.polynomial import Polynomial, is_closed, lagrange_scales, quadrature_1d
 from warp._src.fem.types import cached_coords_type
+from warp._src.fem.utils import type_basis_element
 
 from .shape_function import ShapeFunction
 from .tet_shape_function import TetrahedronPolynomialShapeFunctions
@@ -51,6 +52,8 @@ class CubeShapeFunction(ShapeFunction):
 
 class CubeTripolynomialShapeFunctions(CubeShapeFunction):
     """Tripolynomial (tensor-product Lagrange) shape functions on hexahedral elements."""
+
+    INTERPOLATORY = True
 
     def __init__(self, degree: int, family: Polynomial, scalar_type: type = wp.float32):
         self.family = family
@@ -106,9 +109,10 @@ class CubeTripolynomialShapeFunctions(CubeShapeFunction):
         def node_ijk(
             node_index_in_elt: int,
         ):
-            node_i = node_index_in_elt // (ORDER_PLUS_ONE * ORDER_PLUS_ONE)
+            # Element-local node indices are nonnegative and dimensions are positive, so truncating division is exact.
+            node_i = node_index_in_elt / (ORDER_PLUS_ONE * ORDER_PLUS_ONE)
             node_jk = node_index_in_elt - ORDER_PLUS_ONE * ORDER_PLUS_ONE * node_i
-            node_j = node_jk // ORDER_PLUS_ONE
+            node_j = node_jk / ORDER_PLUS_ONE
             node_k = node_jk - ORDER_PLUS_ONE * node_j
             return node_i, node_j, node_k
 
@@ -403,6 +407,9 @@ class CubeTripolynomialShapeFunctions(CubeShapeFunction):
 
         return cache.get_func(element_inner_weight_gradient, self.name)
 
+    def make_node_dual_weight(self):
+        return self._make_unit_node_dual_weight()
+
     def element_node_hexes(self):
         from warp._src.fem.utils import grid_to_hexes  # noqa: PLC0415
 
@@ -501,6 +508,8 @@ class CubeSerendipityShapeFunctions(CubeShapeFunction):
     Edge shape functions are usual Lagrange shape functions times a bilinear function in the normal directions.
     Corner shape functions are trilinear shape functions times a function of (x^{d-1} + y^{d-1} + z^{d-1}).
     """
+
+    INTERPOLATORY = True
 
     def __init__(self, degree: int, family: Polynomial, scalar_type: type = wp.float32):
         if not is_closed(family):
@@ -772,6 +781,9 @@ class CubeSerendipityShapeFunctions(CubeShapeFunction):
 
         return element_inner_weight_gradient
 
+    def make_node_dual_weight(self):
+        return self._make_unit_node_dual_weight()
+
     def element_node_tets(self):
         from warp._src.fem.utils import grid_to_tets  # noqa: PLC0415
 
@@ -813,6 +825,8 @@ class CubeSerendipityShapeFunctions(CubeShapeFunction):
 
 class CubeNonConformingPolynomialShapeFunctions(ShapeFunction):
     """Non-conforming polynomial shape functions on hexahedral elements using embedded tetrahedra."""
+
+    INTERPOLATORY = True
 
     # embeds the largest regular tet centered at (0.5, 0.5, 0.5) into the reference cube
 
@@ -927,6 +941,9 @@ class CubeNonConformingPolynomialShapeFunctions(ShapeFunction):
             return wp.transpose(CUBE_TO_TET) * grad
 
         return element_inner_weight_gradient
+
+    def make_node_dual_weight(self):
+        return self._make_unit_node_dual_weight()
 
 
 class CubeNedelecFirstKindShapeFunctions(CubeShapeFunction):
@@ -1060,6 +1077,17 @@ class CubeNedelecFirstKindShapeFunctions(CubeShapeFunction):
 
         return element_inner_weight_gradient
 
+    def make_node_dual_weight(self):
+        basis_element = type_basis_element(cached_vec_type(3, self.scalar_type))
+
+        # The node weight at the node is the unit edge tangent, which is also its dual
+        @cache.dynamic_func(suffix=self.name)
+        def node_dual_weight(node_index_in_elt: int):
+            _node_type, type_instance, _type_index = self.node_type_and_type_index(node_index_in_elt)
+            return basis_element(CubeShapeFunction._edge_axis(type_instance))
+
+        return node_dual_weight
+
 
 class CubeRaviartThomasShapeFunctions(CubeShapeFunction):
     """Raviart-Thomas (face) shape functions on hexahedral elements for H(div) spaces."""
@@ -1180,6 +1208,17 @@ class CubeRaviartThomasShapeFunctions(CubeShapeFunction):
             return grad
 
         return element_inner_weight_gradient
+
+    def make_node_dual_weight(self):
+        basis_element = type_basis_element(cached_vec_type(3, self.scalar_type))
+
+        # The node weight at the node is the unit face normal, which is also its dual
+        @cache.dynamic_func(suffix=self.name)
+        def node_dual_weight(node_index_in_elt: int):
+            _node_type, type_instance, _type_index = self.node_type_and_type_index(node_index_in_elt)
+            return basis_element(CubeShapeFunction._face_axis(type_instance))
+
+        return node_dual_weight
 
 
 class CubeBSplineShapeFunctions(CubeShapeFunction):
@@ -1392,6 +1431,10 @@ class CubeBSplineShapeFunctions(CubeShapeFunction):
             return wp.vec3(dx * wy * wz, dy * wz * wx, dz * wx * wy)
 
         return cache.get_func(element_inner_weight_gradient, self.name)
+
+    def make_node_dual_weight(self):
+        # B-splines do not interpolate node values, but using node values as dofs still reproduces linear fields
+        return self._make_unit_node_dual_weight()
 
     def element_node_hexes(self):
         from warp._src.fem.utils import grid_to_hexes  # noqa: PLC0415

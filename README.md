@@ -1,7 +1,7 @@
 [![PyPI version](https://badge.fury.io/py/warp-lang.svg)](https://badge.fury.io/py/warp-lang)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/license/Apache-2.0)
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/NVIDIA/warp?link=https%3A%2F%2Fgithub.com%2FNVIDIA%2Fwarp%2Fcommits%2Fmain)
-[![Downloads](https://static.pepy.tech/badge/warp-lang/month)](https://pepy.tech/project/warp-lang)
+[![Downloads](https://api.pepy.tech/badge/warp-lang/month)](https://pepy.tech/projects/warp-lang)
 [![codecov](https://codecov.io/github/NVIDIA/warp/graph/badge.svg?token=7O1KSM79FG)](https://codecov.io/github/NVIDIA/warp)
 ![GitHub - CI](https://github.com/NVIDIA/warp/actions/workflows/ci.yml/badge.svg)
 
@@ -55,7 +55,13 @@ print(positions.numpy())
 
 ## Installing
 
-Warp requires Python 3.10 or newer. We publish `warp-lang` wheels on PyPI for Windows (x86-64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows x86-64 and Linux wheels support CPU execution and CUDA acceleration. CUDA acceleration requires a supported NVIDIA GPU and driver. The macOS wheels support CPU execution but not Metal acceleration.
+Warp requires Python 3.11 or newer. We publish `warp-lang` wheels on PyPI for Windows (x86-64 and experimental Arm64), Linux (x86-64 and AArch64), and macOS (Apple Silicon). The Windows and Linux wheels support CPU execution and CUDA acceleration. The macOS wheels support CPU execution but not Metal acceleration.
+
+PyPI and nightly wheels for Linux and Windows use CUDA Toolkit 13.4. They require an NVIDIA R580-series or newer driver and a Turing (`sm_75`) or newer GPU for CUDA acceleration. For CUDA 12 environments, download a `+cu12` wheel from [GitHub Releases](https://github.com/NVIDIA/warp/releases) or build Warp from source with CUDA 12.
+
+Starting with Warp 1.19.0, PyPI releases and release candidates include experimental Windows on Arm wheels.
+Install with `pip install warp-lang` from an Arm64 Python environment; see the
+[Windows on Arm installation notes](https://nvidia.github.io/warp/stable/user_guide/installation.html#windows-on-arm).
 
 The easiest way to install Warp is from [PyPI](https://pypi.org/project/warp-lang/):
 
@@ -65,7 +71,7 @@ pip install warp-lang
 
 You can also use `pip install warp-lang[examples]` to install additional dependencies for running examples and USD-related features.
 
-For nightly builds, conda, CUDA 13 builds, building from source, and CUDA driver requirements, see the
+For nightly builds, conda, CUDA 12 compatibility wheels, building from source, and CUDA driver requirements, see the
 [Installation Guide](https://nvidia.github.io/warp/stable/user_guide/installation.html).
 
 ## Tutorial Notebooks
@@ -152,7 +158,7 @@ python -m warp.examples.browse
             <td width="25%"><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fdtd_3d.py"><img src="https://media.githubusercontent.com/media/NVIDIA/warp/refs/heads/main/docs/img/examples/core_fdtd_3d.png"></a></td>
         </tr>
         <tr>
-            <td align="center">3-D FDTD Luneburg lens</td>
+            <td align="center">3-D FDTD Luneburg lens<br><a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/core/example_fdtd_3d.py">single GPU</a> · <a href="https://github.com/NVIDIA/warp/blob/main/warp/examples/distributed/example_fdtd_3d_nccl.py">multi GPU</a></td>
         </tr>
     </tbody>
 </table>

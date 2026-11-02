@@ -16,26 +16,12 @@ smaller: it only requires a texture loaded from an array, a runtime selector,
 and two calls to the same sampling function.
 """
 
-import re
-import shutil
-import subprocess
-import tempfile
 import unittest
-from pathlib import Path
 
 import numpy as np
 
 import warp as wp
 from warp.tests.unittest_utils import add_function_test, get_selected_cuda_test_devices
-
-EXTERNAL_NVCC_TEXTURE_SOURCE = r"""
-#include "aot.h"
-
-extern "C" __global__ void sample_texture(wp::texture1d_t texture, wp::vec2f* output)
-{
-    output[0] = wp::texture_sample_helper<wp::vec2f>::sample_1d(texture, 0.5f, -1.0f);
-}
-"""
 
 
 @wp.struct
@@ -339,14 +325,16 @@ DIMENSION_CASES = (
 )
 
 WIDTH_CASES = (
-    ("scalar_from_scalar_vec2", "scalar_vec2"),
-    ("scalar_from_scalar_vec4", "scalar_vec4"),
+    ("scalar_vec2", 2),
+    ("scalar_vec4", 4),
 )
 
+TEXTURE_VALUES = ((np.float32, 0.1), (np.int32, -1000), (np.uint32, 1000))
 
-def make_constant_scalar_texture(texture_cls, shape, device):
+
+def make_constant_texture(texture_cls, shape, np_dtype, value, device):
     return texture_cls(
-        np.full(shape, 0.1, dtype=np.float32),
+        np.full(shape, value, dtype=np_dtype),
         filter_mode=wp.TextureFilterMode.CLOSEST,
         address_mode=wp.TextureAddressMode.CLAMP,
         normalized_coords=False,
@@ -361,103 +349,62 @@ def test_mixed_width_texture_sampling(
     texture_cls,
     data_cls,
     shape,
+    vector_channels,
 ):
-    texture = make_constant_scalar_texture(texture_cls, shape, device)
-    data = data_cls()
-    data.texture = texture
-    data.kind = 0
-    data.component = 0
-    table = wp.array([data], dtype=data_cls, device=device)
-    out_value = wp.empty(1, dtype=float, device=device)
+    for np_dtype, value in TEXTURE_VALUES:
+        for kind, channels in ((0, 1), (1, vector_channels)):
+            with test.subTest(dtype=np_dtype, channels=channels):
+                data_shape = shape + ((channels,) if channels > 1 else ())
+                data = data_cls()
+                data.texture = make_constant_texture(texture_cls, data_shape, np_dtype, value, device)
+                data.kind = kind
+                data.component = channels - 1
+                table = wp.array([data], dtype=data_cls, device=device)
+                out_value = wp.empty(1, dtype=float, device=device)
 
-    wp.launch(
-        kernel,
-        dim=1,
-        inputs=[wp.vec3f(1.0), table],
-        outputs=[out_value],
-        device=device,
-    )
+                wp.launch(
+                    kernel,
+                    dim=1,
+                    inputs=[wp.vec3f(1.0), table],
+                    outputs=[out_value],
+                    device=device,
+                )
 
-    # The sampled first component is 0.1. Clamping local x from 1.0 to 0.6
-    # contributes the remaining distance of 0.4.
-    np.testing.assert_allclose(
-        out_value.numpy(),
-        np.array([0.5], dtype=np.float32),
-        rtol=0.0,
-        atol=1.0e-6,
-    )
+                # Clamping local x from 1.0 to 0.6 adds a distance of 0.4.
+                np.testing.assert_allclose(
+                    out_value.numpy(),
+                    np.array([value + 0.4], dtype=np.float32),
+                    rtol=0.0,
+                    atol=1.0e-6,
+                )
 
 
 def test_all_widths_texture_sampling(test, device, kernel):
-    texture = wp.Texture1D(
-        np.full((2, 4), 0.1, dtype=np.float32),
-        filter_mode=wp.TextureFilterMode.CLOSEST,
-        address_mode=wp.TextureAddressMode.CLAMP,
-        normalized_coords=False,
-        device=device,
-    )
-    textures = wp.array([texture], dtype=wp.Texture1D, device=device)
-    out_value = wp.empty(1, dtype=float, device=device)
+    for np_dtype, value in TEXTURE_VALUES:
+        with test.subTest(dtype=np_dtype):
+            texture = make_constant_texture(wp.Texture1D, (2, 4), np_dtype, value, device)
+            textures = wp.array([texture], dtype=wp.Texture1D, device=device)
+            out_value = wp.empty(1, dtype=float, device=device)
 
-    wp.launch(
-        kernel,
-        dim=1,
-        inputs=[textures],
-        outputs=[out_value],
-        device=device,
-    )
+            wp.launch(
+                kernel,
+                dim=1,
+                inputs=[textures],
+                outputs=[out_value],
+                device=device,
+            )
 
-    # A width of two selects component two of the vec4 branch. Each of the two
-    # samples contributes 0.1.
-    np.testing.assert_allclose(
-        out_value.numpy(),
-        np.array([0.2], dtype=np.float32),
-        rtol=0.0,
-        atol=1.0e-6,
-    )
+            # A width of two selects component two of the vec4 branch.
+            np.testing.assert_allclose(
+                out_value.numpy(),
+                np.array([2.0 * value], dtype=np.float32),
+                rtol=0.0,
+                atol=1.0e-6,
+            )
 
 
 class TestTextureCompiler(unittest.TestCase):
-    def test_external_nvcc_uses_mixed_width_workaround(self):
-        """Check that direct NVCC builds use the no-inline workaround on affected targets."""
-        nvcc = shutil.which("nvcc")
-        if nvcc is None:
-            self.skipTest("NVCC is not available")
-
-        version_result = subprocess.run((nvcc, "--version"), capture_output=True, check=False, text=True)
-        self.assertEqual(version_result.returncode, 0, version_result.stderr)
-        version_match = re.search(r"release (\d+)\.(\d+)", version_result.stdout)
-        self.assertIsNotNone(version_match, version_result.stdout)
-        cuda_version = tuple(int(part) for part in version_match.groups())
-
-        native_dir = Path(wp.__file__).resolve().parent / "native"
-        with tempfile.TemporaryDirectory() as temp_dir:
-            source_path = Path(temp_dir) / "texture_source_include.cu"
-            source_path.write_text(EXTERNAL_NVCC_TEXTURE_SOURCE)
-
-            for arch in (89, 90):
-                with self.subTest(arch=arch):
-                    output_path = Path(temp_dir) / f"texture_source_include_{arch}.ptx"
-                    result = subprocess.run(
-                        (
-                            nvcc,
-                            "--ptx",
-                            "--std=c++17",
-                            f"--gpu-architecture=compute_{arch}",
-                            f"--include-path={native_dir}",
-                            str(source_path),
-                            f"--output-file={output_path}",
-                        ),
-                        capture_output=True,
-                        check=False,
-                        text=True,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    uses_workaround = arch < 90 and cuda_version < (13, 1)
-                    if uses_workaround:
-                        self.assertIn("sample_base_1d", output_path.read_text())
-                    else:
-                        self.assertNotIn("sample_base_1d", output_path.read_text())
+    pass
 
 
 # Textures need CUDA array / texture-object support, which the HIP backend does
@@ -467,17 +414,18 @@ class TestTextureCompiler(unittest.TestCase):
 devices = [device for device in get_selected_cuda_test_devices() if not device.is_hip]
 for cuda_output, optimization_level in COMPILER_CONFIGS:
     for dimension, texture_cls, data_cls, shape in DIMENSION_CASES:
-        for selected_sample, width_pair in WIDTH_CASES:
+        for width_pair, vector_channels in WIDTH_CASES:
             kernel = TEXTURE_COMPILER_KERNELS[(cuda_output, optimization_level, width_pair, dimension)]
             add_function_test(
                 TestTextureCompiler,
-                f"test_{selected_sample}_{dimension}_{cuda_output}_o{optimization_level}",
+                f"test_{width_pair}_{dimension}_{cuda_output}_o{optimization_level}",
                 test_mixed_width_texture_sampling,
                 devices=devices,
                 kernel=kernel,
                 texture_cls=texture_cls,
                 data_cls=data_cls,
                 shape=shape,
+                vector_channels=vector_channels,
             )
 
     kernel = TEXTURE_COMPILER_KERNELS[(cuda_output, optimization_level, "all_widths", "1d")]

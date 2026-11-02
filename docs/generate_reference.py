@@ -41,6 +41,7 @@ from types import ModuleType
 from typing import TypeVar, get_origin
 
 import warp as wp
+from docs._ext.warp_function_reference import validate_public_functions
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ VALUE_TYPES = (
     float,
     set,
     Mapping,
-    type(None),  # NoneType is only available in types module from Python 3.10+
+    type(None),
     Sequence,
     *wp._src.types.scalar_types,
     *wp._src.types.vector_types,
@@ -523,7 +524,7 @@ def render_category_to_rst(
         lines.append("   :nosignatures:")
         lines.append(f"   :toctree: {TOCTREE_DIR}")
         if module_name == BUILTINS_MODULE:
-            lines.append("   :template: builtins.rst")
+            lines.append("   :template: warp_function.rst")
         lines.append("")
         lines.extend(f"   {s}" for s in non_aliased)
         lines.append("")
@@ -737,6 +738,7 @@ def run():
             if "." not in submodule_rel_name:
                 submodules.append(other_module_name)
 
+        validate_public_functions(module_name, module, symbols, aliased_symbols)
         write_module_page(module_name, symbols, aliased_symbols, submodules, output_api_dir)
 
     # Third pass: handle the built-ins symbols.

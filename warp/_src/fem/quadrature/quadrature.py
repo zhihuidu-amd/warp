@@ -455,11 +455,16 @@ class NodalQuadrature(_QuadratureWithRegularEvaluationPoints):
                 raise ValueError("One of space, basis_space or space_partition must be provided")
             basis_space = space.basis
 
+        if not basis_space.supports_nodal_quadrature:
+            raise ValueError("Nodal quadrature is not supported for a constrained basis; use the raw basis")
+
         if space_partition is None:
             space_partition = WholeSpacePartition(basis_space.topology)
 
         self._basis_space = basis_space
         self._space_partition = space_partition
+        # _make_arg() needs the domain-aware name before the base initializer runs.
+        self._domain = domain
 
         self.Arg = self._make_arg()
         super().__init__(domain, self.max_points_per_element())
@@ -468,7 +473,7 @@ class NodalQuadrature(_QuadratureWithRegularEvaluationPoints):
     @cached_property
     def name(self):
         """Unique name of the quadrature rule."""
-        return f"{self.__class__.__name__}_{self._basis_space.name}_{self._space_partition.name}"
+        return f"{self.__class__.__name__}_{self.domain.name}_{self._basis_space.name}_{self._space_partition.name}"
 
     def total_point_count(self):
         """Total number of quadrature points."""
@@ -616,7 +621,7 @@ class ExplicitQuadrature(_QuadratureWithRegularEvaluationPoints):
     @cached_property
     def name(self):
         """Unique name of the quadrature rule."""
-        return f"{self.__class__.__name__}_{self._scalar_type.__name__}_{self._whole_geo}_{self._EVALUATION_POINTS_PER_ELEMENT}"
+        return f"{self.__class__.__name__}_{self.domain.name}_{self._scalar_type.__name__}_{self._whole_geo}_{self._EVALUATION_POINTS_PER_ELEMENT}"
 
     def total_point_count(self):
         """Total number of quadrature points."""

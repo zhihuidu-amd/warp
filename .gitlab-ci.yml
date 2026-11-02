@@ -46,24 +46,24 @@ variables:
   UV_PYTHON_PREFERENCE: only-managed
   
   # Standard container images (pinned with SHA256 for supply chain security)
-  UV_TRIXIE_IMAGE: "ghcr.io/astral-sh/uv:0.12.7-trixie@sha256:20cd86504a183da51c633012c37903c41c54837f0ff53f6c2298fd1f001148c9"
-  UV_TRIXIE_SLIM_IMAGE: "ghcr.io/astral-sh/uv:0.12.7-trixie-slim@sha256:bd3571a45f9fcd715ca26938a30ef0bbe85a813d4a7c3e9a7dc0e27997f1a442"
-  UV_TRIXIE_SLIM_ARM_IMAGE: "ghcr.io/astral-sh/uv:0.12.7-trixie-slim@sha256:f0c9e8c3b86decaa94dbb7e134d3a3241b7cf4c8c66da2f1bc257d8036bca972"
+  UV_TRIXIE_IMAGE: "ghcr.io/astral-sh/uv:0.13.6-trixie@sha256:fd8c2adad7c04e42196aff87c230058efdad5e4fcc02d5ee194d1215285c0f53"
+  UV_TRIXIE_SLIM_IMAGE: "ghcr.io/astral-sh/uv:0.13.6-trixie-slim@sha256:69c55acfdadd2eb7990a38e8aadaf9cfd6dc7671d8973a345448868718046ef4"
+  UV_TRIXIE_SLIM_ARM_IMAGE: "ghcr.io/astral-sh/uv:0.13.6-trixie-slim@sha256:5a40d6e9bd4271bcbd38d3e9c3101cfca630334d5ec5ec94496553946db18c5f"
   MINIFORGE_IMAGE: "condaforge/miniforge3:25.11.0-0@sha256:d2fadb08950045962fd1cfb1eeb6224442027f03095862e725f4c1c7b17a3caf"
   # Warp builder images are pinned per architecture for supply chain security.
-  WARP_BUILDER_IMAGE_CU12_X86_64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_28-cuda12.9.2-uv0.12.13-x86_64@sha256:6a00ce1bb59bfc350e121fb74641c15bcc423986253cc0462d99e9d25e7c2b0a"
-  WARP_BUILDER_IMAGE_CU12_AARCH64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_34-cuda12.9.2-uv0.12.13-aarch64@sha256:63f474a9fd38dfc14e48194e54b34592460f4f6adb84637373ba4f2443fc11a3"
-  WARP_BUILDER_IMAGE_CU13_X86_64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_28-cuda13.4.2-uv0.12.13-x86_64@sha256:f20945f4d6f72ac9ebb3200fa4720233fc040c51e0ae5cb3bbd181cfd06418a4"
-  WARP_BUILDER_IMAGE_CU13_AARCH64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_34-cuda13.4.2-uv0.12.13-aarch64@sha256:7971084a055c77ebe1d68c6e5e9b8c0ab76f7c1eed0506b32b0ce9a40c628349"
+  WARP_BUILDER_IMAGE_CU12_X86_64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_28-cuda12.9.2-uv0.13.6-x86_64@sha256:d2966c9e898d00b30b2514ecca1d6ef3533d7485e45ed9bafd946849930a5a2d"
+  WARP_BUILDER_IMAGE_CU12_AARCH64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_34-cuda12.9.2-uv0.13.6-aarch64@sha256:97978756b55901c6794c29652c48d672b1164bface4aba87b428bc847cdd0982"
+  WARP_BUILDER_IMAGE_CU13_X86_64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_28-cuda13.4.2-uv0.13.6-x86_64@sha256:a04d0592e2e8c4dc30e15295e7b01bfd7beda42343025881dd09bdbb0bb92b1d"
+  WARP_BUILDER_IMAGE_CU13_AARCH64: "${CI_REGISTRY_IMAGE}/warp-builder:manylinux_2_34-cuda13.4.2-uv0.13.6-aarch64@sha256:d4806e01bae87b50dd180f4357272fb8edace1ab77cb15b9013f4cce1925cd5e"
   
   UV_PYTHON:
     value: "3.12"
     options:
+      - "3.15"
       - "3.14"
       - "3.13"
       - "3.12"
       - "3.11"
-      - "3.10"
     description: "The default UV Python version used in the main testing jobs."
 
   # NVCARPS skill validation and signing
@@ -139,12 +139,11 @@ mac-aarch64 build:
   stage: build
   extends:
     - .save_warp_bin_artifact
-    - .runner-build-macos-universal
     - .macos_warp_tags
   before_script:
     - df -h
     - curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$CI_PROJECT_DIR/_uv" sh
-    - export PATH="$CI_PROJECT_DIR/_uv/bin:$PATH"
+    - export PATH="$CI_PROJECT_DIR/_uv:$PATH"
   script:
     - uv run build_lib.py
 
@@ -288,7 +287,7 @@ doctest:
     - df -h
     - !reference [.snippets, move-linux-x86_64-binaries]
   script:
-    - uv run --extra docs build_docs.py --doctest --no-html --warnings-as-errors
+    - uv run --extra docs build_docs.py --doctest --doctest-jobs 4 --no-html --warnings-as-errors
 
 # The only purpose of this job is to make sure documentation can be built on Windows.
 # The output does not get published anywhere, but the website can be viewed in the
@@ -373,17 +372,20 @@ cppcheck:
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
     - df -h
-    - conda install cppcheck --channel conda-forge
+    - conda install cppcheck=2.22.0 --channel conda-forge
     - python -m pip install -U cppcheck-codequality
     - mkdir -p _build/.cppcheck
     - cppcheck --version
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
+    # Cppcheck cannot evaluate Clang's __has_builtin or parse NVCC's unroll pragma.
     # Pass 1: For the CI log and job failure.
     - cppcheck_exit_code=0
     - >-
       cppcheck
       -UWP_API
+      -U__has_builtin
+      -D__INTELLISENSE__
       --inline-suppr
       --cppcheck-build-dir=_build/.cppcheck
       --enable=warning
@@ -399,6 +401,8 @@ cppcheck:
     - >-
       cppcheck
       -UWP_API
+      -U__has_builtin
+      -D__INTELLISENSE__
       --inline-suppr
       --cppcheck-build-dir=_build/.cppcheck
       --enable=warning
@@ -425,7 +429,7 @@ cppcheck:
 #
 # Comprehensive test suite across multiple platforms (Linux x86_64/aarch64,
 # Windows, specialized hardware like Orin/Thor/Blackwell), Python versions
-# (3.10-3.14), and optional integrations (MuJoCo, JAX, PyTorch). Some jobs
+# (3.11-3.15), and optional integrations (MuJoCo, JAX, PyTorch). Some jobs
 # compute code coverage, others focus on compatibility and performance (ASV).
 # ==============================================================================
 
@@ -472,6 +476,9 @@ linux-aarch64 cu13 test:
 linux-aarch64 cu12 test orin:
   needs: [linux-aarch64 cu12 build]
   image: $UV_TRIXIE_SLIM_ARM_IMAGE
+  # Keep the test runner's --timeout below the job timeout so the runner can
+  # still write a partial JUnit report before GitLab kills the job.
+  timeout: 1h 30m
   extends:
     - .save_test_report_artifact
   rules:
@@ -489,7 +496,7 @@ linux-aarch64 cu12 test orin:
     - uv sync --extra dev --no-install-package psutil
     - !reference [.snippets, section-end-install-deps]
   script:
-    - uv run --with rmm-cu12 -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml -s autodetect --failfast
+    - uv run --with rmm-cu12 -m warp.tests --maxjobs 4 --timeout 5100 --junit-report-xml rspec.xml -s autodetect --failfast
   tags:
     - gpu/orin
 
@@ -624,6 +631,32 @@ linux-x86_64 cu13 free-threaded test:
   script:
     - uv run --python 3.14t --no-sync -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
 
+linux-x86_64 python 3.15 test:
+  stage: test
+  needs: [linux-x86_64 cu13 build]
+  image: $UV_TRIXIE_SLIM_IMAGE
+  allow_failure: true
+  variables:
+    IPP_RUNNER_EXECUTION_DURATION: "3600"
+    UV_PYTHON: "3.15"
+  extends:
+    - .ipp_lnx_x86_64_gpu
+    - .save_test_report_artifact
+    - .basic_test_changes_rules
+  before_script:
+    - !reference [.snippets, section-start-install-deps]
+    - df -h
+    - apt-get update && apt-get install build-essential --no-install-recommends -y
+    - uv python install 3.15
+    - !reference [.snippets, move-linux-x86_64-binaries]
+    # usd-core does not yet publish a Python 3.15 distribution. Keep it out of
+    # this experimental environment until upstream support is available.
+    - uv sync --python 3.15 --extra dev --extra torch-cu13 --no-install-package usd-core
+    - !reference [.snippets, section-end-install-deps]
+  script:
+    - uv run --python 3.15 --no-sync --with "jax[cuda13]>=0.5" python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+    - uv run --python 3.15 --no-sync --with "jax[cuda13]>=0.5" -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
+
 linux-x86_64 cu13 debug-mode test:
   stage: test
   needs: [linux-x86_64 cu13 build]
@@ -639,6 +672,26 @@ linux-x86_64 cu13 debug-mode test:
     - !reference [.snippets, move-linux-x86_64-binaries]
   script:
     - uv run --extra dev -m warp.tests --junit-report-xml rspec.xml --suite debug --warp-debug --isolate-test-processes --failfast
+
+# Compile CUDA kernels with Clang instead of NVRTC. NVRTC treats native functions
+# without CUDA_CALLABLE as device functions, so only Clang-based toolchains
+# reject them.
+linux-x86_64 cu13 llvm-cuda test:
+  stage: test
+  needs: [linux-x86_64 cu13 build]
+  image: $UV_TRIXIE_SLIM_IMAGE
+  variables:
+    IPP_RUNNER_EXECUTION_DURATION: "2700"
+  extends:
+    - .ipp_lnx_x86_64_gpu
+    - .save_test_report_artifact
+    - .basic_test_changes_rules
+  before_script:
+    - df -h
+    - !reference [.snippets, move-linux-x86_64-binaries]
+  script:
+    - uv run --extra dev python -c "import warp as wp; wp.print_diagnostics(); assert wp.get_cuda_devices(), 'No CUDA device visible to Warp'"
+    - uv run --extra dev -m warp.tests --junit-report-xml rspec.xml --suite llvm-cuda --warp-llvm-cuda --failfast
 
 # Note that for throughput reasons this runs on a single-GPU runner
 windows-x86_64 cu12 test:
@@ -851,7 +904,7 @@ linux-x86_64 cu13 python-matrix test:
     - .basic_test_changes_rules
   parallel:
     matrix:
-      - UV_PYTHON: "3.10"
+      - UV_PYTHON: "3.11"
       - UV_PYTHON: "3.13"
       - UV_PYTHON: "3.14"
   before_script:
@@ -867,7 +920,7 @@ linux-x86_64 cu13 python-matrix test:
 # Ensure cpp examples compile and run
 linux-x86_64 cu13 cpp-examples test:
   stage: test
-  image: ${CI_REGISTRY_IMAGE}/warp-cpp-test-env:cuda13.4.2-ubuntu24.04-66cf86262aab@sha256:6d55a2df846632c0c11b271f402bd2f1a6e016e11611bbb58f84a5ac3bea3d97
+  image: ${CI_REGISTRY_IMAGE}/warp-cpp-test-env:cuda13.4.2-ubuntu24.04-e3d68d7bf4f0@sha256:ed661d6f792416356d28f2e0650f774046e9c58f87732cb1865cfd961adf9807
   needs: [linux-x86_64 cu13 build]
   variables:
     IPP_RUNNER_EXECUTION_DURATION: "3600"
@@ -928,48 +981,80 @@ clang compilation:
     - .basic_test_changes_rules
     - .trigger_common
 
-# Run the airspeed velocity (ASV) benchmark suite. Auto-triggers on MR
-# pipelines whose diff touches any path that could affect a benchmark
-# result; the child pipeline itself further gates the heavy tile suite
-# on tile-relevant paths. `needs: []` so the trigger fires at pipeline
-# start and the child's build job is not blocked behind the parent's
-# test stage.
+# Paths that could affect an airspeed velocity (ASV) benchmark result.
+.asv-benchmark-paths:
+  changes:
+    - .gitlab-ci.yml
+    - .gitlab/ci/asv*.yml
+    - asv/**/*
+    - asv.conf.json
+    - warp/*.py
+    - warp/*.pyi
+    - warp/py.typed
+    - warp/_src/**/*
+    - warp/examples/assets/**/*
+    - warp/examples/fem/utils.py
+    - warp/fem/**/*
+    - warp/jax_experimental/**/*
+    - warp/native/**/*
+    - warp/optim/**/*
+    - warp/render/**/*
+    - pyproject.toml
+    - setup.py
+    - deps/*
+    - build_lib.py
+    - build_llvm.py
+
+# Run the ASV benchmark suite. Auto-triggers on MR pipelines whose diff
+# touches any path that could affect a benchmark result; the child pipeline
+# itself further gates the heavy tile suite on tile-relevant paths.
+# `needs: []` so the trigger fires at pipeline start and the child's build
+# job is not blocked behind the parent's test stage.
 asv benchmarks:
   stage: child pipelines
   trigger:
-    include: /.gitlab/ci/asv.yml
+    include: /.gitlab/ci/asv-mr.yml
   needs: []
   extends:
     - .trigger_common
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
-      changes:
-        - .gitlab-ci.yml
-        - .gitlab/ci/asv.yml
-        - asv/**/*
-        - asv.conf.json
-        - warp/*.py
-        - warp/*.pyi
-        - warp/py.typed
-        - warp/_src/**/*
-        - warp/examples/assets/**/*
-        - warp/examples/fem/utils.py
-        - warp/fem/**/*
-        - warp/jax_experimental/**/*
-        - warp/native/**/*
-        - warp/optim/**/*
-        - warp/render/**/*
-        - pyproject.toml
-        - setup.py
-        - deps/*
-        - build_lib.py
-        - build_llvm.py
+      changes: !reference [.asv-benchmark-paths, changes]
     # Manual fallback: any MR whose diff doesn't match the path filter
     # above can still opt in to bench via a play button (e.g. tooling
     # changes that affect codegen but live outside warp/**).
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
       when: manual
       allow_failure: true
+
+# Benchmark each push to main that touches the same paths against the main
+# tip before the push, on the L40 and RTX PRO 6000 pools.
+asv main benchmarks:
+  stage: child pipelines
+  trigger:
+    include: /.gitlab/ci/asv-main.yml
+  needs: []
+  extends:
+    - .trigger_common
+  variables:
+    ASV_COMPARE_MODE: push
+    ASV_PUSH_BEFORE_SHA: $CI_COMMIT_BEFORE_SHA
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes: !reference [.asv-benchmark-paths, changes]
+
+# Benchmark the last day of main on the B200 pool from the daily schedule.
+asv nightly benchmarks:
+  stage: child pipelines
+  trigger:
+    include: /.gitlab/ci/asv-main.yml
+  needs: []
+  extends:
+    - .trigger_common
+  variables:
+    ASV_COMPARE_MODE: nightly
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 # ==============================================================================
 # Packaging Jobs

@@ -154,8 +154,7 @@ bvh_get_node_index_at_depth(bvh_query_thread_block_t& query, int node_index, int
             return -1;
     }
 
-    for (int i = 0; i < num_expansion_steps; ++i) {
-        int bit_position = num_expansion_steps - 1 - i;
+    for (int bit_position = num_expansion_steps - 1; bit_position >= 0; --bit_position) {
         int lower_upper_select = (lane_id >> bit_position) & 1;
 
         node_index = bvh_load_node(node_lowers_uppers[lower_upper_select], node_index).i;
@@ -178,6 +177,7 @@ bvh_get_node_index_at_depth(bvh_query_thread_block_t& query, int node_index, int
 }
 
 // block_size should be a power of 2. 2^num_expansion_steps should be less than or equal to block_size.
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline bool bvh_query_next_thread_block_impl(bvh_query_thread_block_t& query, int& index)
 {
     int block_size = blockDim.x;
@@ -327,6 +327,7 @@ bvh_query_aabb_thread_block_impl(uint64_t id, const vec3& lower, const vec3& upp
 
 // CPU version: single-threaded. bvh_query_thread_block_t is just bvh_query_t and is shared
 // by the AABB and ray tiled entry points, so dispatch on the query's stored kind.
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline bool bvh_query_next_thread_block_impl(bvh_query_thread_block_t& query, int& index)
 {
     return bvh_query_next_dynamic(query, index, FLT_MAX);
@@ -348,6 +349,7 @@ template <int Length> CUDA_CALLABLE inline auto tile_bvh_query_next_impl(bvh_que
 }
 
 // Wrapper that works for any block size
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline auto tile_bvh_query_next(bvh_query_thread_block_t& query)
 {
     return tile_bvh_query_next_impl<WP_TILE_BLOCK_DIM>(query);
@@ -363,12 +365,14 @@ CUDA_CALLABLE inline bool tile_query_valid(const bvh_query_thread_block_t& query
 }
 
 // New tile-based alias for the query function
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
 {
     return bvh_query_aabb_thread_block_impl(id, lower, upper);
 }
 
 // New tile-based ray query function
+WP_COMPILE_IF_USED
 CUDA_CALLABLE inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir)
 {
     return bvh_query_thread_block(id, true, start, 1.0f / dir);
@@ -398,6 +402,7 @@ template <int Length> inline auto tile_bvh_query_next_impl(bvh_query_thread_bloc
     return result;
 }
 
+WP_COMPILE_IF_USED
 inline auto tile_bvh_query_next(bvh_query_thread_block_t& query)
 {
     return tile_bvh_query_next_impl<WP_TILE_BLOCK_DIM>(query);
@@ -406,6 +411,7 @@ inline auto tile_bvh_query_next(bvh_query_thread_block_t& query)
 inline bool tile_query_valid(const bvh_query_thread_block_t& query) { return query.last_query_valid; }
 
 // CPU version: tile_bvh_query_aabb just creates a regular query
+WP_COMPILE_IF_USED
 inline bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3& lower, const vec3& upper)
 {
     // On CPU, this is just bvh_query_aabb since bvh_query_thread_block_t = bvh_query_t
@@ -413,6 +419,7 @@ inline bvh_query_thread_block_t tile_bvh_query_aabb(uint64_t id, const vec3& low
 }
 
 // CPU version: tile_bvh_query_ray just creates a regular ray query
+WP_COMPILE_IF_USED
 inline bvh_query_thread_block_t tile_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir)
 {
     // On CPU, this is just bvh_query_ray since bvh_query_thread_block_t = bvh_query_t

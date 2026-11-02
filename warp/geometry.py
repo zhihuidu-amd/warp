@@ -10,17 +10,17 @@ isosurface extraction.
 Dense-grid isosurface backends take a 3-D ``wp.float32`` field sampled at grid
 nodes and share the :class:`IsoSurfaceBase` interface, so they can be swapped
 without changing calling code: :class:`IsoSurfaceMarchingCubes` produces
-triangles.
+triangles, and :class:`IsoSurfaceNets` produces triangles or quads.
 
 Sparse extraction skips the dense grid entirely. :func:`sparse_marching_cubes`
 takes an implicit function and builds a Lipschitz octree around the level set,
 so cost scales with surface area rather than volume. :func:`lipschitz_octree`
 and :func:`sparse_marching_cubes_from_cells` expose its two stages separately.
 
-Array-level functions such as :func:`swept_volume_mesh` launch kernels over a whole
-mesh or grid. Device functions such as :func:`swept_volume_sdf` evaluate a
-single point and may be called from within your own :func:`warp.kernel`
-definitions.
+The Python API includes array-level functions, such as :func:`swept_volume_mesh`,
+that launch kernels over a whole mesh or grid. The kernel API includes Warp
+functions, such as :func:`swept_volume_sdf`, that evaluate a single point and may
+be called from your own :func:`warp.kernel` definitions and other Warp functions.
 
 Usage:
     This module must be explicitly imported::
@@ -30,8 +30,11 @@ Usage:
 
 # isort: skip_file
 
+# category: Python API
+
 from warp._src.geometry.iso_surface import IsoSurfaceBase as IsoSurfaceBase
 from warp._src.geometry.marching_cubes import IsoSurfaceMarchingCubes as IsoSurfaceMarchingCubes
+from warp._src.geometry.surface_nets import IsoSurfaceNets as IsoSurfaceNets
 from warp._src.geometry.sparse_marching_cubes import (
     lipschitz_octree as lipschitz_octree,
     sparse_marching_cubes as sparse_marching_cubes,
@@ -39,13 +42,16 @@ from warp._src.geometry.sparse_marching_cubes import (
 )
 from warp._src.geometry import SweptVolumeSignMode as SweptVolumeSignMode
 from warp._src.geometry import delaunay_edge_flip as delaunay_edge_flip
-from warp._src.geometry import find_triangle_neighbor_edge_index as find_triangle_neighbor_edge_index
 from warp._src.geometry import swept_volume_bounds as swept_volume_bounds
 from warp._src.geometry import swept_volume_field as swept_volume_field
 from warp._src.geometry import swept_volume_mesh as swept_volume_mesh
-from warp._src.geometry import swept_volume_sdf as swept_volume_sdf
 
 # Don't expose these quite yet in case we want to change the naming conventions.
 # from warp._src.geometry import in_circle as in_circle
 # from warp._src.geometry import signed_area as signed_area
 from warp._src.geometry import tri_tri_adjacency as tri_tri_adjacency
+
+# category: Kernel API
+
+from warp._src.geometry import find_triangle_neighbor_edge_index as find_triangle_neighbor_edge_index
+from warp._src.geometry import swept_volume_sdf as swept_volume_sdf
