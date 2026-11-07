@@ -366,7 +366,7 @@ struct cuda_array_desc_t {
 // Reduce periodic coordinates before division or scaling can discard the
 // fractional position (or overflow). Unnormalized CPU textures also support
 // periodic addressing, unlike CUDA textures.
-inline float cpu_texture_normalized_coord(float coord, int normalized, int base_dim, int address_mode)
+inline CUDA_CALLABLE float cpu_texture_normalized_coord(float coord, int normalized, int base_dim, int address_mode)
 {
     if (address_mode == WP_TEXTURE_ADDRESS_WRAP || address_mode == WP_TEXTURE_ADDRESS_MIRROR) {
         const float period
@@ -381,7 +381,7 @@ inline float cpu_texture_normalized_coord(float coord, int normalized, int base_
 // Convert reduced normalized coordinates to bounded texel coordinates.
 // Apply periodic addressing to integer indices after rounding, so CLOSEST
 // filtering chooses the same side of a MIRROR boundary as the CUDA sampler.
-inline float cpu_apply_address_mode_1d(float coord, int size, int address_mode)
+inline CUDA_CALLABLE float cpu_apply_address_mode_1d(float coord, int size, int address_mode)
 {
     float texel = coord * float(size) - 0.5f;
     if (address_mode == WP_TEXTURE_ADDRESS_CLAMP)
@@ -394,11 +394,11 @@ inline float cpu_apply_address_mode_1d(float coord, int size, int address_mode)
 }
 
 // Clamp integer index to valid range
-inline int64 cpu_clamp_index(int64 idx, int size) { return (idx < 0) ? 0 : ((idx >= size) ? size - 1 : idx); }
+inline CUDA_CALLABLE int64 cpu_clamp_index(int64 idx, int size) { return (idx < 0) ? 0 : ((idx >= size) ? size - 1 : idx); }
 
 // Apply address mode to an integer texel index
 // This is used for neighbor indices in linear filtering to properly handle wrap/mirror
-inline int64 cpu_apply_address_mode_index(int64 idx, int size, int address_mode)
+inline CUDA_CALLABLE int64 cpu_apply_address_mode_index(int64 idx, int size, int address_mode)
 {
     switch (address_mode) {
     case WP_TEXTURE_ADDRESS_WRAP: {
@@ -428,7 +428,7 @@ inline int64 cpu_apply_address_mode_index(int64 idx, int size, int address_mode)
 // Avoid the linear sampler's subtract/add-half round trip, which can erase a
 // small negative coordinate before BORDER addressing. Wide arithmetic also
 // preserves its sign through normalization, including float32 subnormals.
-inline int64 cpu_nearest_texel_index(float coord, int normalized, int base_dim, int level_dim, int address_mode)
+inline CUDA_CALLABLE int64 cpu_nearest_texel_index(float coord, int normalized, int base_dim, int level_dim, int address_mode)
 {
     double reduced = double(coord);
     if (address_mode == WP_TEXTURE_ADDRESS_WRAP || address_mode == WP_TEXTURE_ADDRESS_MIRROR) {
@@ -445,17 +445,17 @@ inline int64 cpu_nearest_texel_index(float coord, int normalized, int base_dim, 
 }
 
 // Check if index is within bounds (for border mode)
-inline bool cpu_in_bounds_1d(int64 x, int w) { return x >= 0 && x < w; }
+inline CUDA_CALLABLE bool cpu_in_bounds_1d(int64 x, int w) { return x >= 0 && x < w; }
 
-inline bool cpu_in_bounds_2d(int64 x, int64 y, int w, int h) { return x >= 0 && x < w && y >= 0 && y < h; }
+inline CUDA_CALLABLE bool cpu_in_bounds_2d(int64 x, int64 y, int w, int h) { return x >= 0 && x < w && y >= 0 && y < h; }
 
-inline bool cpu_in_bounds_3d(int64 x, int64 y, int64 z, int w, int h, int d)
+inline CUDA_CALLABLE bool cpu_in_bounds_3d(int64 x, int64 y, int64 z, int w, int h, int d)
 {
     return x >= 0 && x < w && y >= 0 && y < h && z >= 0 && z < d;
 }
 
 // Clamp a LOD value to the texture's valid mip-level range.
-inline float cpu_clamp_lod(const Texture* tex, float lod)
+inline CUDA_CALLABLE float cpu_clamp_lod(const Texture* tex, float lod)
 {
     if (lod < 0.0f)
         return 0.0f;
@@ -464,7 +464,7 @@ inline float cpu_clamp_lod(const Texture* tex, float lod)
 }
 
 // Convert IEEE 754 half-precision bits to float (for CPU float16 texture support)
-inline float cpu_half_to_float(uint16_t h)
+inline CUDA_CALLABLE float cpu_half_to_float(uint16_t h)
 {
     uint32_t sign = (uint32_t)(h >> 15) << 31;
     uint32_t exp = (h >> 10) & 0x1F;
@@ -501,7 +501,7 @@ inline float cpu_half_to_float(uint16_t h)
 
 // Decode a raw texel at ``idx`` into a float. Normalize 8- and 16-bit integers;
 // convert 32-bit integers numerically and return float types as-is.
-inline float cpu_decode_texel(const void* level_data, int dtype, size_t idx)
+inline CUDA_CALLABLE float cpu_decode_texel(const void* level_data, int dtype, size_t idx)
 {
     switch (dtype) {
     case WP_TEXTURE_DTYPE_UINT8:
@@ -529,7 +529,7 @@ inline float cpu_decode_texel(const void* level_data, int dtype, size_t idx)
 }
 
 // Fetch a single texel value from the given mip level.
-inline float cpu_fetch_texel_1d(const Texture* tex, int level, int64 x, int channel)
+inline CUDA_CALLABLE float cpu_fetch_texel_1d(const Texture* tex, int level, int64 x, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     if (!cpu_in_bounds_1d(x, w) || channel < 0 || channel >= tex->num_channels) {
@@ -539,7 +539,7 @@ inline float cpu_fetch_texel_1d(const Texture* tex, int level, int64 x, int chan
     return cpu_decode_texel(tex->mip_data[level], tex->dtype, idx);
 }
 
-inline float cpu_fetch_texel_2d(const Texture* tex, int level, int64 x, int64 y, int channel)
+inline CUDA_CALLABLE float cpu_fetch_texel_2d(const Texture* tex, int level, int64 x, int64 y, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -550,7 +550,7 @@ inline float cpu_fetch_texel_2d(const Texture* tex, int level, int64 x, int64 y,
     return cpu_decode_texel(tex->mip_data[level], tex->dtype, idx);
 }
 
-inline float cpu_fetch_texel_3d(const Texture* tex, int level, int64 x, int64 y, int64 z, int channel)
+inline CUDA_CALLABLE float cpu_fetch_texel_3d(const Texture* tex, int level, int64 x, int64 y, int64 z, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -563,7 +563,7 @@ inline float cpu_fetch_texel_3d(const Texture* tex, int level, int64 x, int64 y,
 }
 
 // Sample a single channel with linear interpolation (1D) at a specific mip level.
-inline float cpu_sample_1d_channel_at_level(const Texture* tex, int level, float u, int channel)
+inline CUDA_CALLABLE float cpu_sample_1d_channel_at_level(const Texture* tex, int level, float u, int channel)
 {
     const int w = tex->mip_widths_arr[level];
 
@@ -591,7 +591,7 @@ inline float cpu_sample_1d_channel_at_level(const Texture* tex, int level, float
 }
 
 // Sample a single channel with bilinear interpolation (2D) at a specific mip level.
-inline float cpu_sample_2d_channel_at_level(const Texture* tex, int level, float u, float v, int channel)
+inline CUDA_CALLABLE float cpu_sample_2d_channel_at_level(const Texture* tex, int level, float u, float v, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -630,7 +630,7 @@ inline float cpu_sample_2d_channel_at_level(const Texture* tex, int level, float
 }
 
 // Sample a single channel with trilinear interpolation (3D) at a specific mip level.
-inline float cpu_sample_3d_channel_at_level(const Texture* tex, int level, float u, float v, float w_coord, int channel)
+inline CUDA_CALLABLE float cpu_sample_3d_channel_at_level(const Texture* tex, int level, float u, float v, float w_coord, int channel)
 {
     const int w = tex->mip_widths_arr[level];
     const int h = tex->mip_heights_arr[level];
@@ -690,7 +690,7 @@ inline float cpu_sample_3d_channel_at_level(const Texture* tex, int level, float
 }
 
 // Sample a single channel across mipmap levels using the texture's mip filter mode.
-inline float cpu_sample_1d_channel(const Texture* tex, float u, int channel, float lod)
+inline CUDA_CALLABLE float cpu_sample_1d_channel(const Texture* tex, float u, int channel, float lod)
 {
     float clamped_lod = cpu_clamp_lod(tex, lod);
     int level0 = (int)floor(clamped_lod);
@@ -711,7 +711,7 @@ inline float cpu_sample_1d_channel(const Texture* tex, float u, int channel, flo
     return v0 * (1.0f - fl) + v1 * fl;
 }
 
-inline float cpu_sample_2d_channel(const Texture* tex, float u, float v, int channel, float lod)
+inline CUDA_CALLABLE float cpu_sample_2d_channel(const Texture* tex, float u, float v, int channel, float lod)
 {
     float clamped_lod = cpu_clamp_lod(tex, lod);
     int level0 = (int)floor(clamped_lod);
@@ -732,7 +732,7 @@ inline float cpu_sample_2d_channel(const Texture* tex, float u, float v, int cha
     return v0 * (1.0f - fl) + v1 * fl;
 }
 
-inline float cpu_sample_3d_channel(const Texture* tex, float u, float v, float w, int channel, float lod)
+inline CUDA_CALLABLE float cpu_sample_3d_channel(const Texture* tex, float u, float v, float w, int channel, float lod)
 {
     float clamped_lod = cpu_clamp_lod(tex, lod);
     int level0 = (int)floor(clamped_lod);
@@ -1254,7 +1254,7 @@ texture_grad_cell(float coord, int normalized, int base_dim, int level_dim, int 
 
 #if !WP_TEXTURE_USE_HW_SAMPLER
 // Read CPU corners directly so coordinate round trips cannot interpolate them.
-template <typename T> inline T cpu_texture_grad_texel(const Texture* tex, int level, int64 x, int64 y = 0, int64 z = 0)
+template <typename T> inline CUDA_CALLABLE T cpu_texture_grad_texel(const Texture* tex, int level, int64 x, int64 y = 0, int64 z = 0)
 {
     x = cpu_apply_address_mode_index(x, tex->mip_widths_arr[level], tex->address_mode_u);
     y = cpu_apply_address_mode_index(y, tex->mip_heights_arr[level], tex->address_mode_v);
